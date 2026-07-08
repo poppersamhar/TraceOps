@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.traceops/
+.playwright-cli/
+output/
+.vercel/
+.env
+.env*
+.DS_Store
+*.log
