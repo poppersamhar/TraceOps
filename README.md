@@ -247,6 +247,12 @@ VITE_TRACEOPS_DEMO=true npm run build
 - 导出动作会记录 export run，支持后续审计。
 - Demo Mode 只包含演示数据，不包含真实 KodaX session。
 
+## License
+
+TraceOps 当前为专有软件，仓库声明为 `UNLICENSED`。
+
+未经授权，不允许复制、修改、分发、再授权、公开发布或用于商业 / 生产用途。内部体验或评估权限需要由版权所有者单独授予。
+
 ## 一句话总结
 
 TraceOps 是 KodaX 的数据沉淀层：它把真实 Agent 工作过程变成可治理、可追溯、可导出的训练数据集，让产品能够从真实任务中持续自我进化。
