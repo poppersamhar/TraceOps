@@ -249,9 +249,7 @@ VITE_TRACEOPS_DEMO=true npm run build
 
 ## License
 
-TraceOps 当前为专有软件，仓库声明为 `UNLICENSED`。
-
-未经授权，不允许复制、修改、分发、再授权、公开发布或用于商业 / 生产用途。内部体验或评估权限需要由版权所有者单独授予。
+TraceOps is open source under the [MIT License](./LICENSE).
 
 ## 一句话总结
 
