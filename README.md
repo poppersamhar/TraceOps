@@ -2,7 +2,7 @@
 
 TraceOps v0.1.0 是一个本地运行的 **Space Session 评测数据采集器**。
 
-它读取同事电脑上的 KodaX Space Session，自动完成筛选、脱敏、Trace 还原、Evaluation Case 构建和质量检查，最后生成一个 `.json.gz` 数据包。数据只在本机处理，不会自动上传，也不会修改 Space 的原始文件。
+它读取电脑上的 KodaX Space Session，自动完成筛选、脱敏、Trace 还原、Evaluation Case 构建和质量检查，最后生成一个 `.json.gz` 数据包。数据只在本机处理，不会自动上传，也不会修改 Space 的原始文件。
 
 ## 下载
 
