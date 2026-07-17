@@ -38,6 +38,11 @@ import {
   createTasks,
   createReleaseManifest,
   createDatasetVersion,
+  createAgentBenchmarkCaseFromTrace,
+  createAgentBenchmarkSuite,
+  createAgentEvaluationExperiment,
+  createAgentEvaluationIssue,
+  createHarnessSnapshot,
   createDeploymentHandoff,
   createFeedbackDatasetVersion,
   createFeedbackLoop,
@@ -60,6 +65,7 @@ import {
   getGovernancePolicy,
   getKodaXFeedbackPackage,
   getKodaXFeedbackReport,
+  getPlatformArchitecture,
   getSegmentStoreStatus,
   getSourceStatus,
   getStorageHealth,
@@ -78,6 +84,12 @@ import {
   listExportRuns,
   listFeedbackLoops,
   listJobs,
+  listAgentBenchmarkCases,
+  listAgentBenchmarkSuites,
+  listAgentEvaluationExperiments,
+  listAgentEvaluationIssues,
+  listAgentEvaluationReports,
+  listHarnessSnapshots,
   listKodaXFeedbackWritebacks,
   listMemoryCandidates,
   listModelReleaseGates,
@@ -103,6 +115,7 @@ import {
   restoreStorageSnapshot,
   restoreIngestQualityRecommendation,
   recordTrainingRunResult,
+  recordAgentEvaluationRollout,
   resolveFixedKodaXIngestDiagnostics,
   releaseManifestDownloadUrl,
   releasePackageDownloadUrl,
@@ -123,6 +136,8 @@ import {
   runClosedLoopRollout,
   revokeExportRun,
   runTrainingEval,
+  startAgentEvaluationExperiment,
+  completeAgentEvaluationExperiment,
   setKodaXWatch,
   setQualityPolicyAutoApply,
   syncKodaX,
@@ -136,6 +151,11 @@ import {
   writeClosedLoopFeedbackSignal,
 } from './api';
 import type {
+  AgentBenchmarkCase,
+  AgentBenchmarkSuite,
+  AgentEvaluationComparisonReport,
+  AgentEvaluationExperiment,
+  AgentEvaluationIssue,
   CleanTrace,
   CleanTraceListResponse,
   DatasetClosedLoopFeedbackSignalMode,
@@ -164,6 +184,7 @@ import type {
   DatasetVersionDiffReviewDecision,
   GovernanceAuditRecord,
   GovernancePolicyResponse,
+  HarnessSnapshot,
   IngestDiagnosticTriageDecision,
   IngestJob,
   IngestQualityIssue,
@@ -187,6 +208,10 @@ import type {
   StorePersistenceHealth,
   TraceOpsSegmentBackfillResult,
   TraceOpsSegmentStoreStatus,
+  TraceOpsPlatformArchitecture,
+  TraceOpsProductAreaId,
+  TraceOpsProductRelease,
+  TraceOpsReleaseStatus,
   StoreSnapshotRecord,
   TraceOpsTaskAutomationPlan,
   TraceOpsTaskCreateInput,
@@ -253,6 +278,7 @@ const datasetBuilderKinds = [
 ] as const;
 
 type DatasetBuilderKind = (typeof datasetBuilderKinds)[number]['kind'];
+const traceFoundationDatasetKinds: DatasetBuilderKind[] = ['eval', 'repair', 'tool_use', 'planning'];
 type ReviewQueueFocus = { kind: string; status?: string; requestedAt: number };
 type CommandCenterStatus = 'ready' | 'attention' | 'blocked';
 type PipelineNodeStatus = 'ready' | 'attention' | 'blocked' | 'idle';
@@ -289,10 +315,22 @@ interface EntityInspectorState {
 type LineageMapStageId = 'capture' | 'dataset' | 'release' | 'training' | 'rollout' | 'feedback';
 type LineageMapNodeTone = 'good' | 'warn' | 'danger' | 'neutral';
 type LineageMapFilterMode = 'all' | 'path' | 'attention' | 'task_linked';
-type PipelineStageId = 'stage-ingest' | 'stage-raw' | 'stage-governance' | 'stage-dataset' | 'stage-delivery' | 'stage-feedback' | 'stage-system';
+type PipelineStageId =
+  | 'stage-ingest'
+  | 'stage-raw'
+  | 'stage-governance'
+  | 'stage-dataset'
+  | 'stage-evaluation'
+  | 'stage-model-evaluation'
+  | 'stage-training'
+  | 'stage-release'
+  | 'stage-feedback'
+  | 'stage-system';
+type WorkspaceAreaId = TraceOpsProductAreaId | 'platform';
 
 interface PipelineStageMeta {
   id: PipelineStageId;
+  areaId: WorkspaceAreaId;
   index: string;
   title: string;
   detail: string;
@@ -301,44 +339,72 @@ interface PipelineStageMeta {
 const pipelineStageMeta: PipelineStageMeta[] = [
   {
     id: 'stage-ingest',
-    index: '01',
-    title: '数据接入',
+    areaId: 'data_access',
+    index: 'D1',
+    title: 'Session 接入',
     detail: '从本机 KodaX sessions 拉取完整运行记录，并把同步异常交给质量治理处理。',
   },
   {
     id: 'stage-raw',
-    index: '02-03',
-    title: '原始还原与证据归因',
+    areaId: 'data_access',
+    index: 'D2',
+    title: 'Trace 与 Evidence',
     detail: '把 session 还原成 Raw Trace、事件时间线、实体关系和 evidence 链路。',
   },
   {
     id: 'stage-governance',
-    index: '04',
-    title: '数据治理',
-    detail: '把 Raw Trace 蒸馏成训练样本，并完成风险、证据、脱敏、Review、Repair 和记忆候选治理。',
+    areaId: 'data_access',
+    index: 'D3',
+    title: 'Trace 预处理与治理',
+    detail: '把 Raw Trace 清洗成评测候选，并完成风险、证据、脱敏、Review 与 Repair 治理。',
   },
   {
     id: 'stage-dataset',
-    index: '05',
-    title: '数据集构建',
-    detail: '把通过治理的 candidate samples 固化为 dataset version，并对版本差异、质量和发布门禁做审查。',
+    areaId: 'data_access',
+    index: 'D4',
+    title: '评测数据集版本',
+    detail: '把通过治理的 Trace 候选固化为 evaluation dataset version，并审查版本差异、质量和 Lineage。',
   },
   {
-    id: 'stage-delivery',
-    index: '06',
-    title: '导出交付',
-    detail: '把 dataset version 封装成 release manifest、导出包、训练交接和模型发布门禁。',
+    id: 'stage-evaluation',
+    areaId: 'evaluation',
+    index: 'E1',
+    title: 'Agent / Harness 评测',
+    detail: '固定 Model 与 Runtime，对比工程师提交的 H0/H1 Harness 是否真正改善目标能力。',
+  },
+  {
+    id: 'stage-model-evaluation',
+    areaId: 'evaluation',
+    index: 'E2',
+    title: '模型评测',
+    detail: '固定 Harness 与 Benchmark，对比后训练前后的 Model Snapshot，并验证 Model × Harness 组合。',
+  },
+  {
+    id: 'stage-training',
+    areaId: 'model_training',
+    index: 'T1',
+    title: '模型后训练',
+    detail: '从已治理数据集创建训练交接、启动 Provider 训练并跟踪模型产物。',
+  },
+  {
+    id: 'stage-release',
+    areaId: 'model_training',
+    index: 'T2',
+    title: '模型发布',
+    detail: '将模型评测结论转化为 Release Gate、Deployment Handoff 和可回滚发布。',
   },
   {
     id: 'stage-feedback',
-    index: '07',
-    title: '反馈闭环',
+    areaId: 'model_training',
+    index: 'T3',
+    title: '上线反馈闭环',
     detail: '把训练、评测、部署和上线监控信号回流成下一轮数据集。',
   },
   {
     id: 'stage-system',
-    index: '08',
-    title: '系统治理',
+    areaId: 'platform',
+    index: 'P1',
+    title: '平台治理',
     detail: '集中查看审计、存储健康、KodaX 反哺包和自动任务编排。',
   },
 ];
@@ -348,8 +414,17 @@ function getPipelineStageMeta(id?: string): PipelineStageMeta | undefined {
 }
 
 function getPipelineStageFromHash(hash = typeof window === 'undefined' ? '' : window.location.hash): PipelineStageId | undefined {
-  const id = hash.replace(/^#\/?/, '');
+  const rawId = hash.replace(/^#\/?/, '');
+  const id = rawId === 'stage-delivery' ? 'stage-training' : rawId;
   return getPipelineStageMeta(id)?.id;
+}
+
+function stagesForArea(areaId: WorkspaceAreaId): PipelineStageMeta[] {
+  return pipelineStageMeta.filter((stage) => stage.areaId === areaId);
+}
+
+function defaultStageForArea(areaId: TraceOpsProductAreaId): PipelineStageId {
+  return stagesForArea(areaId)[0]?.id ?? 'stage-ingest';
 }
 type LineageAuditVerdict = 'ready' | 'needs_review' | 'blocked';
 type LineageAuditCapability = 'ready' | 'review' | 'blocked';
@@ -1689,6 +1764,200 @@ function PipelineStageSection(props: {
   );
 }
 
+function productAreaIcon(areaId: TraceOpsProductAreaId) {
+  if (areaId === 'data_access') return <Database size={22} />;
+  if (areaId === 'evaluation') return <BookOpenCheck size={22} />;
+  return <Server size={22} />;
+}
+
+function productReleaseStatusLabel(status: TraceOpsReleaseStatus): string {
+  if (status === 'current') return '当前正式版本';
+  if (status === 'next') return '下一版本';
+  return '规划版本';
+}
+
+function ProductReleaseRoadmap({ releases }: { releases: TraceOpsProductRelease[] }) {
+  return (
+    <section className="product-release-roadmap" aria-label="TraceOps product release roadmap">
+      <div className="release-roadmap-heading">
+        <div>
+          <span className="section-label">Semantic Release Roadmap</span>
+          <h3>按版本逐层扩大产品边界</h3>
+        </div>
+        <p>每个版本都继承上一阶段能力；只有达到验收标准，下一阶段才进入正式交付。</p>
+      </div>
+      <div className="release-roadmap-list">
+        {releases.map((release) => (
+          <article className={`release-roadmap-card release-${release.status}`} key={release.version}>
+            <div className="release-roadmap-card-head">
+              <span className="release-version">v{release.version}</span>
+              <b className={`release-${release.status}`}>{productReleaseStatusLabel(release.status)}</b>
+            </div>
+            <strong>{release.title}</strong>
+            <p>{release.scope}</p>
+            <div className="release-deliverable">
+              <small>版本交付物</small>
+              <span>{release.deliverable}</span>
+            </div>
+            <small className="release-acceptance-count">
+              <CheckCircle2 size={13} /> {release.acceptanceCriteria.length} 项版本验收标准
+            </small>
+          </article>
+        ))}
+      </div>
+      <div className="release-scope-rule">
+        <GitBranch size={16} />
+        <span><strong>当前生产范围：v0.1.0</strong> 评测能力保留为 v0.2.0 开发预览，模型后训练保留为 v0.3.0 规划验证。</span>
+      </div>
+    </section>
+  );
+}
+
+function ProductReleaseScopeBanner({ architecture, areaId }: {
+  architecture?: TraceOpsPlatformArchitecture;
+  areaId: WorkspaceAreaId;
+}) {
+  if (!architecture || areaId === 'platform') return null;
+  const area = architecture.areas.find((item) => item.id === areaId);
+  const release = architecture.releases.find((item) => item.version === area?.introducedIn);
+  if (!area || !release || release.status === 'current') return null;
+  return (
+    <section className={`product-release-scope-banner release-${release.status}`}>
+      <span className="release-version">v{release.version}</span>
+      <div>
+        <strong>{productReleaseStatusLabel(release.status)}开发预览，不属于 v{architecture.currentVersion} 正式交付范围</strong>
+        <small>{release.scope}</small>
+      </div>
+      <span className="release-scope-deliverable">目标：{release.deliverable}</span>
+    </section>
+  );
+}
+
+function PlatformArchitectureOverviewPanel({ architecture, onOpenStage }: {
+  architecture?: TraceOpsPlatformArchitecture;
+  onOpenStage: (id: PipelineStageId) => void;
+}) {
+  if (!architecture) {
+    return (
+      <section className="platform-architecture loading">
+        <Loader2 className="spin" size={20} />
+        正在读取 TraceOps 产品架构…
+      </section>
+    );
+  }
+  const areaName = (id: TraceOpsProductAreaId) => architecture.areas.find((area) => area.id === id)?.shortTitle ?? id;
+  const openModule = (stageId: string) => {
+    const stage = getPipelineStageMeta(stageId);
+    if (stage) onOpenStage(stage.id);
+  };
+
+  return (
+    <section className="platform-architecture">
+      <div className="platform-architecture-hero">
+        <div>
+          <span className="pipeline-eyebrow">Current Release · TraceOps v{architecture.currentVersion}</span>
+          <h2>v0.1.0 先把 Trace 数据基础打牢</h2>
+          <p>{architecture.releases.find((release) => release.status === 'current')?.scope}</p>
+        </div>
+        <div className="platform-architecture-version">
+          <span>v{architecture.currentVersion}</span>
+          <b>Production scope</b>
+          <small>{formatDate(architecture.generatedAt)}</small>
+        </div>
+      </div>
+
+      <ProductReleaseRoadmap releases={architecture.releases} />
+
+      <div className="platform-area-grid">
+        {architecture.areas.map((area) => (
+          <article className={`platform-area-card platform-area-${area.id} status-${area.status} release-${area.releaseStatus}`} key={area.id}>
+            <div className="platform-area-head">
+              <span className="platform-area-icon">{productAreaIcon(area.id)}</span>
+              <span>
+                <small>0{area.order} · v{area.introducedIn}</small>
+                <strong>{area.title}</strong>
+              </span>
+              <b className={`platform-release-status release-${area.releaseStatus}`}>{productReleaseStatusLabel(area.releaseStatus)}</b>
+            </div>
+            <p>{area.purpose}</p>
+            <div className="platform-capability-health">
+              <span className={`platform-module-status status-${area.status}`} />
+              {area.releaseStatus === 'current' ? '正式能力状态' : '开发预览状态'}：{pipelineNodeStatusLabel(area.status)}
+            </div>
+            <div className="platform-artifact-flow">
+              <span><small>输入</small>{area.entryArtifact}</span>
+              <ChevronRight size={16} />
+              <span><small>输出</small>{area.exitArtifact}</span>
+            </div>
+            <div className="platform-module-list">
+              {area.modules.map((module) => (
+                <button type="button" key={module.id} onClick={() => openModule(module.stageId)}>
+                  <span className={`platform-module-status status-${module.status}`} />
+                  <span className="platform-module-copy">
+                    <strong>{module.title}</strong>
+                    <small>{module.purpose}</small>
+                  </span>
+                  <span className="platform-module-metrics">
+                    {module.metrics.slice(0, 3).map((metric) => (
+                      <small className={metric.tone ? `tone-${metric.tone}` : ''} key={`${module.id}-${metric.label}`}>
+                        <b>{metric.value}</b> {metric.label}
+                      </small>
+                    ))}
+                  </span>
+                  <ChevronRight size={15} />
+                </button>
+              ))}
+            </div>
+            <button className="secondary-button platform-area-cta" type="button" onClick={() => openModule(area.modules[0]?.stageId ?? '')}>
+              {area.releaseStatus === 'current' ? `进入 v${area.introducedIn} ${area.shortTitle}` : `查看 v${area.introducedIn} 开发预览`}
+              <ChevronRight size={15} />
+            </button>
+          </article>
+        ))}
+      </div>
+
+      <div className="platform-transition-panel">
+        <div className="section-label">跨域契约</div>
+        <div className="platform-transition-list">
+          {architecture.transitions.map((transition) => (
+            <div key={`${transition.from}-${transition.to}-${transition.artifact}`}>
+              <strong>{areaName(transition.from)}</strong>
+              <span><ChevronRight size={14} /> {transition.artifact}</span>
+              <strong>{areaName(transition.to)}</strong>
+              <small>{transition.rule}</small>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="evaluation-boundary-panel">
+        <div>
+          <span className="section-label">Agent Evaluation</span>
+          <strong>评测 Harness 是否变强</strong>
+          <p>{architecture.evaluationBoundary.agentEvaluation}</p>
+        </div>
+        <div>
+          <span className="section-label">Model Evaluation</span>
+          <strong>评测模型是否变强</strong>
+          <p>{architecture.evaluationBoundary.modelEvaluation}</p>
+        </div>
+      </div>
+
+      <button className="platform-foundation" type="button" onClick={() => onOpenStage('stage-system')}>
+        <Wrench size={18} />
+        <span>
+          <strong>{architecture.sharedFoundation.title}</strong>
+          <small>{architecture.sharedFoundation.purpose}</small>
+        </span>
+        <span className="platform-foundation-capabilities">
+          {architecture.sharedFoundation.capabilities.map((capability) => <small key={capability}>{capability}</small>)}
+        </span>
+        <ChevronRight size={16} />
+      </button>
+    </section>
+  );
+}
+
 function PipelineOverviewPanel(props: {
   source?: SourceStatus;
   traceTotals: TraceListResponse['totals'];
@@ -1701,6 +1970,8 @@ function PipelineOverviewPanel(props: {
   exportRuns: DatasetExportRun[];
   trainingRuns: DatasetTrainingRunRecord[];
   evalRuns: DatasetEvalRunRecord[];
+  agentEvaluationExperiments: AgentEvaluationExperiment[];
+  agentEvaluationReports: AgentEvaluationComparisonReport[];
   feedbackLoops: DatasetFeedbackLoopRecord[];
   taskSummary: TraceOpsTaskListResponse['summary'];
   storageHealth?: StorePersistenceHealth;
@@ -1842,6 +2113,22 @@ function PipelineOverviewPanel(props: {
       icon: <Braces size={16} />,
     },
     {
+      id: 'agent-evaluation',
+      stageId: 'stage-evaluation',
+      title: 'Agent评测',
+      subtitle: '固定Model，对比Harness H0/H1',
+      tooltip: '把工程师的 Harness 变更放进同一套 Validation Suite，比较目标能力、成本和 Case Churn。',
+      metric: `${props.agentEvaluationExperiments.length} experiments`,
+      status: props.agentEvaluationReports.some((item) => item.verdict === 'regressed')
+        ? 'attention'
+        : props.agentEvaluationReports.length > 0
+          ? 'ready'
+          : props.agentEvaluationExperiments.length > 0
+            ? 'attention'
+            : 'idle',
+      icon: <BookOpenCheck size={16} />,
+    },
+    {
       id: 'govern',
       stageId: 'stage-governance',
       title: '数据治理',
@@ -1869,7 +2156,7 @@ function PipelineOverviewPanel(props: {
     },
     {
       id: 'delivery',
-      stageId: 'stage-delivery',
+      stageId: 'stage-training',
       title: '导出交付',
       subtitle: 'Manifest / handoff / export',
       tooltip: '生成交付包和清单，给训练、评测或外部系统使用。',
@@ -2053,30 +2340,57 @@ function PipelineOverviewPanel(props: {
   );
 }
 
-function PipelineModulePageHeader(props: {
+function PipelineModulePageHeader({ activeStage, onHome, onOpenStage }: {
   activeStage: PipelineStageMeta;
   onHome: () => void;
   onOpenStage: (id: PipelineStageId) => void;
 }) {
+  const businessAreas: Array<{ id: TraceOpsProductAreaId; label: string; version: string }> = [
+    { id: 'data_access', label: '数据接入', version: 'v0.1.0' },
+    { id: 'evaluation', label: '评测', version: 'v0.2.0' },
+    { id: 'model_training', label: '模型后训练', version: 'v0.3.0' },
+  ];
+  const areaStages = stagesForArea(activeStage.areaId);
   return (
     <section className="pipeline-page-header">
       <div className="pipeline-page-main">
-        <button className="secondary-button" type="button" onClick={props.onHome}>
+        <button className="secondary-button" type="button" onClick={onHome}>
           <ArrowLeft size={16} />
-          Pipeline 总览
+          平台总览
         </button>
         <div>
-          <span className="pipeline-eyebrow">Module {props.activeStage.index}</span>
-          <h2>{props.activeStage.title}</h2>
-          <p>{props.activeStage.detail}</p>
+          <span className="pipeline-eyebrow">Workspace {activeStage.index}</span>
+          <h2>{activeStage.title}</h2>
+          <p>{activeStage.detail}</p>
         </div>
       </div>
-      <div className="pipeline-page-nav" aria-label="TraceOps modules">
-        {pipelineStageMeta.map((stage) => (
+      <div className="platform-area-nav" aria-label="TraceOps product areas">
+        {businessAreas.map((area) => (
           <button
-            className={stage.id === props.activeStage.id ? 'active' : ''}
+            className={activeStage.areaId === area.id ? 'active' : ''}
             type="button"
-            onClick={() => props.onOpenStage(stage.id)}
+            onClick={() => onOpenStage(defaultStageForArea(area.id))}
+            key={area.id}
+          >
+            <span>{area.version}</span>
+            {area.label}
+          </button>
+        ))}
+        <button
+          className={activeStage.areaId === 'platform' ? 'active' : ''}
+          type="button"
+          onClick={() => onOpenStage('stage-system')}
+        >
+          <span>·</span>
+          平台治理
+        </button>
+      </div>
+      <div className="pipeline-page-nav" aria-label="Current product area modules">
+        {areaStages.map((stage) => (
+          <button
+            className={stage.id === activeStage.id ? 'active' : ''}
+            type="button"
+            onClick={() => onOpenStage(stage.id)}
             key={stage.id}
           >
             <span>{stage.index}</span>
@@ -3218,9 +3532,9 @@ function TrainingSamplesPanel(props: {
         Dataset Candidate Pool
         <span className="panel-count">{props.totals.total} generated</span>
         <div className="sample-actions">
-          <a className="export-link" href={trainingSampleExportUrl(candidateParams, 'fine_tune_jsonl')} download title="导出可训练 candidate JSONL">
+          <a className="export-link" href={trainingSampleExportUrl(candidateParams, 'eval_jsonl')} download title="导出评测 candidate JSONL">
             <Download size={14} />
-            Fine-tune
+            Eval Dataset
           </a>
           <a className="export-link" href={trainingSampleExportUrl(reviewParams, 'review_jsonl')} download title="导出待审核样本 JSONL">
             <Download size={14} />
@@ -3233,7 +3547,7 @@ function TrainingSamplesPanel(props: {
         </div>
       </div>
       {props.samples.length === 0 ? (
-        <p className="muted">还没有训练样本候选。先同步 KodaX session。</p>
+        <p className="muted">还没有 Trace 数据集候选。先同步 KodaX session。</p>
       ) : (
         <div className="sample-table">
           <div className="sample-head-row">
@@ -3270,6 +3584,7 @@ function TrainingSamplesPanel(props: {
 function ReviewQueuePanel(props: {
   samples: TrainingSample[];
   focus?: ReviewQueueFocus;
+  allowedKinds?: DatasetBuilderKind[];
   onSelectTrace: (id: string) => void;
   onReviewSamples: (sampleIds: string[], decision: 'approved' | 'rejected') => Promise<void>;
 }) {
@@ -3338,7 +3653,7 @@ function ReviewQueuePanel(props: {
       <div className="review-toolbar">
         <select value={filters.kind} onChange={(event) => update({ kind: event.target.value })}>
           <option value="">All kinds</option>
-          {datasetBuilderKinds.map((item) => (
+          {datasetBuilderKinds.filter((item) => !props.allowedKinds || props.allowedKinds.includes(item.kind)).map((item) => (
             <option key={item.kind} value={item.kind}>{item.label}</option>
           ))}
         </select>
@@ -6233,6 +6548,7 @@ function DatasetBuilderPanel(props: {
   samples: TrainingSample[];
   filters: Filters;
   creating: boolean;
+  allowedKinds?: DatasetBuilderKind[];
   onReviewKind: (kind: DatasetBuilderKind) => void;
   onCreateKindVersion: (input: { kind: DatasetBuilderKind; sampleIds: string[]; format: DatasetExportFormat }) => Promise<void>;
 }) {
@@ -6245,7 +6561,7 @@ function DatasetBuilderPanel(props: {
         <span className="panel-count">{totalGenerated} generated samples</span>
       </div>
       <div className="builder-grid">
-        {datasetBuilderKinds.map((item) => {
+        {datasetBuilderKinds.filter((item) => !props.allowedKinds || props.allowedKinds.includes(item.kind)).map((item) => {
           const samples = props.samples.filter((sample) => sample.kind === item.kind);
           const candidateCount = samples.filter((sample) => sample.status === 'candidate').length;
           const reviewCount = samples.filter((sample) => sample.status === 'needs_review').length;
@@ -6405,6 +6721,7 @@ function ReleaseManifestSummary(props: {
 }
 
 function DatasetVersionsPanel(props: {
+  mode?: 'evaluation' | 'training';
   versions: DatasetVersion[];
   manifests: DatasetReleaseManifest[];
   diff?: DatasetVersionDiff;
@@ -6431,27 +6748,29 @@ function DatasetVersionsPanel(props: {
     <section className={`dataset-versions-panel ${entityFocusClass(props.focusedEntity, 'dataset_version')}`} data-entity-panel="dataset_version">
       <div className="panel-title">
         <Database size={16} />
-        Dataset Registry
+        {props.mode === 'evaluation' ? 'Evaluation Dataset Registry' : 'Dataset Registry'}
         <span className="panel-count">{props.versions.length} versions</span>
-        <div className="sample-actions">
+        {props.mode !== 'evaluation' && <div className="sample-actions">
           <button className="primary-button" disabled={props.candidateCount === 0 || props.creating} onClick={props.onCreate}>
             {props.creating ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}
             Create SFT train set
           </button>
-        </div>
+        </div>}
       </div>
       <div className="dataset-version-summary">
         <span className={props.candidateCount > 0 ? 'pill good' : 'pill'}>
-          {props.candidateCount} SFT candidates
+          {props.candidateCount} {props.mode === 'evaluation' ? 'evaluation candidates' : 'SFT candidates'}
         </span>
         <span className="pill">source: kodax_candidate_pool</span>
-        <span className={props.feedbackReadyCount > 0 ? 'pill good' : 'pill'}>
-          {props.feedbackReadyCount} feedback loops ready
-        </span>
-        <span className="pill">default: fine_tune_jsonl</span>
+        {props.mode !== 'evaluation' && (
+          <span className={props.feedbackReadyCount > 0 ? 'pill good' : 'pill'}>
+            {props.feedbackReadyCount} feedback loops ready
+          </span>
+        )}
+        <span className="pill">default: {props.mode === 'evaluation' ? 'eval_jsonl' : 'fine_tune_jsonl'}</span>
       </div>
       {props.versions.length === 0 ? (
-        <p className="muted">还没有固化的数据集版本。审批通过 candidate 后，可以从候选池生成第一版训练集。</p>
+        <p className="muted">还没有固化的数据集版本。治理通过后，可以从候选池生成第一版{props.mode === 'evaluation' ? '评测数据集' : '训练集'}。</p>
       ) : props.versions.slice(0, 8).map((version) => {
         const rowGate = buildDatasetReleaseGate(version, version.sampleSnapshots ?? [], props.diff);
         return (
@@ -6484,6 +6803,7 @@ function DatasetVersionsPanel(props: {
         );
       })}
       <DatasetVersionDetail
+        mode={props.mode}
         version={selectedVersion}
         manifest={props.manifests.find((manifest) => manifest.datasetVersionId === selectedVersion?.id)}
         diff={props.diff?.headVersionId === selectedVersion?.id ? props.diff : undefined}
@@ -6503,6 +6823,7 @@ function DatasetVersionsPanel(props: {
 }
 
 function DatasetVersionDetail(props: {
+  mode?: 'evaluation' | 'training';
   version?: DatasetVersion;
   manifest?: DatasetReleaseManifest;
   diff?: DatasetVersionDiff;
@@ -6656,15 +6977,17 @@ function DatasetVersionDetail(props: {
         </div>
       </div>
 
-      <ReleaseManifestSummary
-        version={props.version}
-        manifest={props.manifest}
-        releaseBlocked={releaseGate.releaseBlocked}
-        generating={props.generatingManifestVersionId === props.version.id}
-        promoting={props.manifest ? props.promotingManifestId === props.manifest.id : false}
-        onCreateManifest={props.onCreateManifest}
-        onPromoteManifest={props.onPromoteManifest}
-      />
+      {props.mode !== 'evaluation' && (
+        <ReleaseManifestSummary
+          version={props.version}
+          manifest={props.manifest}
+          releaseBlocked={releaseGate.releaseBlocked}
+          generating={props.generatingManifestVersionId === props.version.id}
+          promoting={props.manifest ? props.promotingManifestId === props.manifest.id : false}
+          onCreateManifest={props.onCreateManifest}
+          onPromoteManifest={props.onPromoteManifest}
+        />
+      )}
 
       <div className="dataset-version-detail-grid">
         <div className="dataset-version-detail-block">
@@ -8006,7 +8329,167 @@ function ClosedLoopRetrainingPanel(props: {
   );
 }
 
+function AgentEvaluationWorkbench(props: {
+  traces: RawTrace[];
+  harnessSnapshots: HarnessSnapshot[];
+  issues: AgentEvaluationIssue[];
+  benchmarkCases: AgentBenchmarkCase[];
+  benchmarkSuites: AgentBenchmarkSuite[];
+  experiments: AgentEvaluationExperiment[];
+  reports: AgentEvaluationComparisonReport[];
+  busyKey?: string;
+  onCreateHarness: () => void;
+  onCreateIssue: () => void;
+  onCreateCase: () => void;
+  onCreateSuite: (issueId: string) => void;
+  onCreateExperiment: () => void;
+  onStartExperiment: (id: string) => void;
+  onImportPairedResults: (experiment: AgentEvaluationExperiment) => void;
+  onCompleteExperiment: (id: string) => void;
+}) {
+  const completed = props.reports.filter((report) => report.verdict === 'improved').length;
+  const validationCases = props.benchmarkCases.filter((item) => item.usage === 'validation' && item.status === 'ready');
+  const latestReport = props.reports[0];
+  const metricLabel = (experiment: AgentEvaluationExperiment, id: string) => experiment.metrics.find((metric) => metric.id === id)?.label ?? id;
+  const metricValue = (value: number, unit?: string) => {
+    if (unit === 'percent') return `${Math.round(value * 1000) / 10}%`;
+    if (unit === 'tokens') return `${Math.round(value).toLocaleString()} tok`;
+    if (unit === 'ms') return `${Math.round(value).toLocaleString()} ms`;
+    return String(Math.round(value * 1000) / 1000);
+  };
+
+  return (
+    <div className="agent-eval-workbench">
+      <section className="stats-grid agent-eval-stats">
+        <StatCard label="Harness Snapshots" value={props.harnessSnapshots.length} icon={<GitBranch size={18} />} />
+        <StatCard label="Evaluation Issues" value={props.issues.length} icon={<AlertTriangle size={18} />} />
+        <StatCard label="Validation Cases" value={validationCases.length} icon={<BookOpenCheck size={18} />} />
+        <StatCard label="Improved" value={completed} icon={<CheckCircle2 size={18} />} />
+      </section>
+
+      <section className="agent-eval-toolbar">
+        <div>
+          <div className="section-label">Target-capability A/B workflow</div>
+          <h2>固定 Model，对比 Harness H0 与 H1</h2>
+          <p>先声明工程问题和成功指标，再冻结 Validation Suite，导入成对 Rollout，最后生成可审计 Verdict。</p>
+        </div>
+        <div className="agent-eval-actions">
+          <button className="secondary-button" onClick={props.onCreateHarness}><GitBranch size={15} /> New Harness</button>
+          <button className="secondary-button" onClick={props.onCreateIssue}><AlertTriangle size={15} /> New Issue</button>
+          <button className="secondary-button" disabled={props.traces.length === 0} onClick={props.onCreateCase}><BookOpenCheck size={15} /> Case from Trace</button>
+          <button className="primary-button" disabled={props.harnessSnapshots.length < 2 || props.benchmarkSuites.length === 0} onClick={props.onCreateExperiment}><Play size={15} /> New Experiment</button>
+        </div>
+      </section>
+
+      <div className="agent-eval-columns">
+        <section className="agent-eval-panel">
+          <div className="panel-title"><GitBranch size={16} /> Harness Registry <span className="panel-count">{props.harnessSnapshots.length}</span></div>
+          {props.harnessSnapshots.length === 0 ? <p className="muted">先登记当前线上 H0 和工程师候选 H1。</p> : (
+            <div className="agent-eval-list">
+              {props.harnessSnapshots.slice(0, 8).map((snapshot) => (
+                <article key={snapshot.id} className="agent-eval-card">
+                  <div><strong>{snapshot.name}</strong><span className={`pill agent-eval-status-${snapshot.status}`}>{snapshot.status}</span></div>
+                  <small>{snapshot.version} · {snapshot.source.commit ?? snapshot.source.profileVersion ?? 'local snapshot'}</small>
+                  <p>{snapshot.changeSummary ?? 'Baseline Harness snapshot'}</p>
+                  <code>{snapshot.contentHash.slice(0, 24)}</code>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="agent-eval-panel">
+          <div className="panel-title"><AlertTriangle size={16} /> Issues & Suites <span className="panel-count">{props.issues.length}</span></div>
+          {props.issues.length === 0 ? <p className="muted">从真实 Session 创建一个可验证的工程问题。</p> : (
+            <div className="agent-eval-list">
+              {props.issues.slice(0, 8).map((issue) => {
+                const suites = props.benchmarkSuites.filter((suite) => suite.issueId === issue.id);
+                return (
+                  <article key={issue.id} className="agent-eval-card">
+                    <div><strong>{issue.title}</strong><span className={`pill agent-eval-status-${issue.status}`}>{issue.status}</span></div>
+                    <small>{issue.category} · primary {issue.primaryMetricId} · {issue.sourceTraceIds.length} traces</small>
+                    <p>{issue.description || 'No issue description.'}</p>
+                    <div className="agent-eval-card-footer">
+                      <span>{suites.length} suites</span>
+                      <button className="text-button" disabled={validationCases.length === 0} onClick={() => props.onCreateSuite(issue.id)}>Freeze validation suite</button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
+        </section>
+      </div>
+
+      <section className="agent-eval-panel agent-eval-experiments">
+        <div className="panel-title"><Workflow size={16} /> H0/H1 Experiments <span className="panel-count">{props.experiments.length}</span></div>
+        {props.experiments.length === 0 ? <p className="muted">冻结 Suite 后创建第一个固定 Model 的成对实验。</p> : (
+          <div className="agent-eval-experiment-list">
+            {props.experiments.slice(0, 10).map((experiment) => {
+              const baseline = props.harnessSnapshots.find((item) => item.id === experiment.baselineHarnessId);
+              const candidate = props.harnessSnapshots.find((item) => item.id === experiment.candidateHarnessId);
+              const suite = props.benchmarkSuites.find((item) => item.id === experiment.benchmarkSuiteId);
+              const report = props.reports.find((item) => item.experimentId === experiment.id);
+              return (
+                <article key={experiment.id} className="agent-eval-experiment-card">
+                  <div className="agent-eval-experiment-head">
+                    <div>
+                      <strong>{baseline?.version ?? 'H0'} → {candidate?.version ?? 'H1'}</strong>
+                      <small>{experiment.modelSnapshot.provider}/{experiment.modelSnapshot.model} · {suite?.name ?? experiment.benchmarkSuiteId}</small>
+                    </div>
+                    <span className={`pill agent-eval-status-${report?.verdict ?? experiment.status}`}>{report?.verdict ?? experiment.status}</span>
+                  </div>
+                  {report ? (
+                    <>
+                      <div className="agent-eval-metric-grid">
+                        {report.deltas.slice(0, 7).map((delta) => {
+                          const definition = experiment.metrics.find((item) => item.id === delta.metricId);
+                          return (
+                            <div key={delta.metricId} className={delta.passed ? 'agent-eval-metric good' : 'agent-eval-metric warn'}>
+                              <span>{metricLabel(experiment, delta.metricId)}</span>
+                              <strong>{metricValue(delta.baseline, definition?.unit)} → {metricValue(delta.candidate, definition?.unit)}</strong>
+                              <small>Δ {metricValue(delta.delta, definition?.unit)}</small>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div className="agent-eval-churn">
+                        <span>Pass→Pass <b>{report.churn.passToPass}</b></span>
+                        <span>Fail→Pass <b>{report.churn.failToPass}</b></span>
+                        <span>Pass→Fail <b>{report.churn.passToFail}</b></span>
+                        <span>Critical <b>{report.churn.criticalRegressions}</b></span>
+                      </div>
+                      <p className="agent-eval-recommendation">{report.recommendation}</p>
+                    </>
+                  ) : (
+                    <div className="agent-eval-card-footer">
+                      <span>{experiment.status} · {experiment.repetitions} repetition · {suite?.caseIds.length ?? 0} cases</span>
+                      <div>
+                        {experiment.status === 'draft' && <button className="secondary-button" disabled={props.busyKey === experiment.id} onClick={() => props.onStartExperiment(experiment.id)}><Play size={14} /> Start</button>}
+                        {experiment.status === 'running' && <button className="secondary-button" disabled={props.busyKey === experiment.id} onClick={() => props.onImportPairedResults(experiment)}><UploadCloud size={14} /> Import Pair</button>}
+                        {experiment.status === 'running' && <button className="primary-button" disabled={props.busyKey === experiment.id} onClick={() => props.onCompleteExperiment(experiment.id)}><BookOpenCheck size={14} /> Complete</button>}
+                      </div>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {latestReport && (
+        <section className={`agent-eval-latest agent-eval-latest-${latestReport.verdict}`}>
+          <div><strong>Latest verdict: {latestReport.verdict}</strong><span>{latestReport.reportHash.slice(0, 26)}</span></div>
+          <p>{latestReport.reasons.join(' ')}</p>
+        </section>
+      )}
+    </div>
+  );
+}
+
 export function App() {
+  const [platformArchitecture, setPlatformArchitecture] = useState<TraceOpsPlatformArchitecture>();
   const [source, setSource] = useState<SourceStatus>();
   const [jobs, setJobs] = useState<IngestJob[]>([]);
   const [ingestQualityQueue, setIngestQualityQueue] = useState<IngestQualityQueueResponse>({
@@ -8067,6 +8550,13 @@ export function App() {
   const [trainingLaunchPlans, setTrainingLaunchPlans] = useState<DatasetTrainingLaunchPlan[]>([]);
   const [trainingRuns, setTrainingRuns] = useState<DatasetTrainingRunRecord[]>([]);
   const [evalRuns, setEvalRuns] = useState<DatasetEvalRunRecord[]>([]);
+  const [harnessSnapshots, setHarnessSnapshots] = useState<HarnessSnapshot[]>([]);
+  const [agentEvaluationIssues, setAgentEvaluationIssues] = useState<AgentEvaluationIssue[]>([]);
+  const [agentBenchmarkCases, setAgentBenchmarkCases] = useState<AgentBenchmarkCase[]>([]);
+  const [agentBenchmarkSuites, setAgentBenchmarkSuites] = useState<AgentBenchmarkSuite[]>([]);
+  const [agentEvaluationExperiments, setAgentEvaluationExperiments] = useState<AgentEvaluationExperiment[]>([]);
+  const [agentEvaluationReports, setAgentEvaluationReports] = useState<AgentEvaluationComparisonReport[]>([]);
+  const [agentEvaluationBusyKey, setAgentEvaluationBusyKey] = useState<string>();
   const [modelReleaseGates, setModelReleaseGates] = useState<DatasetModelReleaseGateRecord[]>([]);
   const [deploymentHandoffs, setDeploymentHandoffs] = useState<DatasetDeploymentHandoffRecord[]>([]);
   const [postReleaseMonitors, setPostReleaseMonitors] = useState<DatasetPostReleaseMonitorRecord[]>([]);
@@ -8087,6 +8577,14 @@ export function App() {
     cleanTraces: [],
     totals: { total: 0, ready: 0, needsReview: 0, blocked: 0, highRisk: 0, averageQuality: 0 },
   });
+  const traceFoundationSamples = useMemo(
+    () => sampleList.samples.filter((sample) => sample.kind !== 'sft' && sample.kind !== 'preference'),
+    [sampleList.samples],
+  );
+  const traceFoundationSampleTotals = useMemo(
+    () => ({ ...sampleList.totals, total: traceFoundationSamples.length }),
+    [sampleList.totals, traceFoundationSamples.length],
+  );
   const [memoryCandidateList, setMemoryCandidateList] = useState<MemoryCandidateListResponse>({
     candidates: [],
     totals: { total: 0, candidate: 0, needsReview: 0, promoted: 0, rejected: 0, blocked: 0, highRisk: 0, averageConfidence: 0 },
@@ -8883,7 +9381,8 @@ export function App() {
   }, [focusedTaskEntity]);
 
   async function refreshList(nextSelectedId?: string) {
-    const [status, traces, recentJobs, qualityQueue, policy, policyRuns, taskItems, automationPlan, recentExports, manifests, promotions, handoffs, closedLoopPlans, launchPlans, runs, evalItems, gates, deploymentItems, postMonitors, feedbackItems, versions, projectList, samples, cleanTraces, memoryCandidates, governanceRules, auditLog, persistenceHealth, segmentStatus, snapshots, feedbackReport, feedbackPackage, feedbackWritebacks] = await Promise.all([
+    const [architecture, status, traces, recentJobs, qualityQueue, policy, policyRuns, taskItems, automationPlan, recentExports, manifests, promotions, handoffs, closedLoopPlans, launchPlans, runs, evalItems, harnessItems, agentIssues, agentCases, agentSuites, agentExperiments, agentReports, gates, deploymentItems, postMonitors, feedbackItems, versions, projectList, samples, cleanTraces, memoryCandidates, governanceRules, auditLog, persistenceHealth, segmentStatus, snapshots, feedbackReport, feedbackPackage, feedbackWritebacks] = await Promise.all([
+      getPlatformArchitecture(),
       getSourceStatus(),
       listTraces(params),
       listJobs(),
@@ -8900,6 +9399,12 @@ export function App() {
       listTrainingLaunchPlans(),
       listTrainingRuns(),
       listEvalRuns(),
+      listHarnessSnapshots(),
+      listAgentEvaluationIssues(),
+      listAgentBenchmarkCases(),
+      listAgentBenchmarkSuites(),
+      listAgentEvaluationExperiments(),
+      listAgentEvaluationReports(),
       listModelReleaseGates(),
       listDeploymentHandoffs(),
       listPostReleaseMonitors(),
@@ -8918,6 +9423,7 @@ export function App() {
       getKodaXFeedbackPackage(),
       listKodaXFeedbackWritebacks(8),
     ]);
+    setPlatformArchitecture(architecture);
     setSource(status);
     setTraceList(traces);
     setJobs(recentJobs);
@@ -8934,6 +9440,12 @@ export function App() {
     setTrainingLaunchPlans(launchPlans);
     setTrainingRuns(runs);
     setEvalRuns(evalItems);
+    setHarnessSnapshots(harnessItems);
+    setAgentEvaluationIssues(agentIssues);
+    setAgentBenchmarkCases(agentCases);
+    setAgentBenchmarkSuites(agentSuites);
+    setAgentEvaluationExperiments(agentExperiments);
+    setAgentEvaluationReports(agentReports);
     setModelReleaseGates(gates);
     setDeploymentHandoffs(deploymentItems);
     setPostReleaseMonitors(postMonitors);
@@ -10374,6 +10886,240 @@ export function App() {
     }
   }
 
+  async function handleCreateHarnessSnapshot() {
+    const name = window.prompt('Harness name', harnessSnapshots.length === 0 ? 'KodaX baseline Harness' : 'KodaX candidate Harness');
+    if (!name) return;
+    const version = window.prompt('Harness version', harnessSnapshots.length === 0 ? 'h0' : `h${harnessSnapshots.length}`);
+    if (!version) return;
+    const defaultParent = harnessSnapshots[0]?.id ?? '';
+    const parentId = window.prompt('Parent Harness ID（baseline留空）', defaultParent);
+    if (parentId === null) return;
+    const commit = window.prompt('Git commit / config revision', 'local-working-tree');
+    if (commit === null) return;
+    const changeSummary = window.prompt('Change objective', parentId ? 'Improve the target capability discovered from real sessions.' : 'Current production baseline.');
+    if (changeSummary === null) return;
+    setAgentEvaluationBusyKey('harness');
+    setError(undefined);
+    try {
+      await createHarnessSnapshot({
+        name,
+        version,
+        parentId: parentId.trim() || undefined,
+        status: parentId.trim() ? 'candidate' : 'active',
+        source: { commit: commit.trim() || undefined },
+        components: {
+          promptHash: `revision:${commit.trim() || version}:prompt`,
+          contextPolicyHash: `revision:${commit.trim() || version}:context`,
+          skillManifestHash: `revision:${commit.trim() || version}:skills`,
+        },
+        compatibleModels: Array.from(new Set(traceList.traces.map((trace) => trace.runtime.model).filter((item): item is string => Boolean(item)))),
+        changeSummary,
+        sourceTraceIds: selectedTraceId ? [selectedTraceId] : [],
+      });
+      await refreshList(selectedTraceId);
+      setNotice(`Harness ${version} 已登记。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
+  async function handleCreateAgentEvaluationIssue() {
+    const title = window.prompt('Evaluation issue', detail?.trace.title ? `${detail.trace.title}：目标能力改进` : 'KodaX target capability issue');
+    if (!title) return;
+    const description = window.prompt('Observed failure and expected improvement', 'Describe the repeated failure observed in real sessions and the expected Harness improvement.');
+    if (description === null) return;
+    const categoryInput = window.prompt('Category: context / skill / memory / tool_use / planning / verification / runtime', 'verification');
+    if (categoryInput === null) return;
+    const allowed = ['context', 'skill', 'memory', 'tool_use', 'planning', 'verification', 'runtime'] as const;
+    const category = allowed.find((item) => item === categoryInput) ?? 'other';
+    setAgentEvaluationBusyKey('issue');
+    setError(undefined);
+    try {
+      await createAgentEvaluationIssue({
+        title,
+        description,
+        category,
+        sourceTraceIds: selectedTraceId ? [selectedTraceId] : [],
+        scopeTags: detail?.trace.projectKey ? [detail.trace.projectKey, 'kodax'] : ['kodax'],
+        primaryMetricId: 'task_success',
+      });
+      await refreshList(selectedTraceId);
+      setNotice('Evaluation Issue 已创建。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
+  async function handleCreateAgentBenchmarkCase() {
+    const defaultTraceId = selectedTraceId ?? traceList.traces[0]?.id;
+    const traceId = window.prompt('Validation source Trace ID', defaultTraceId ?? '');
+    if (!traceId) return;
+    const title = window.prompt('Validation case title', traceList.traces.find((trace) => trace.id === traceId)?.title ?? 'KodaX validation task');
+    if (title === null) return;
+    const critical = window.confirm('是否将此任务标记为关键能力 Case？');
+    setAgentEvaluationBusyKey('case');
+    setError(undefined);
+    try {
+      await createAgentBenchmarkCaseFromTrace(traceId, {
+        title: title.trim() || undefined,
+        usage: 'validation',
+        taskType: 'kodax-task',
+        critical,
+      });
+      await refreshList(selectedTraceId);
+      setNotice('Validation Case 已从 Clean Trace 创建。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
+  async function handleCreateAgentBenchmarkSuite(issueId: string) {
+    const issue = agentEvaluationIssues.find((item) => item.id === issueId);
+    const available = agentBenchmarkCases.filter((item) => item.usage === 'validation' && item.status === 'ready');
+    if (available.length === 0) return;
+    const name = window.prompt('Frozen Validation Suite name', `${issue?.title ?? 'Harness validation'} v1`);
+    if (!name) return;
+    setAgentEvaluationBusyKey(issueId);
+    setError(undefined);
+    try {
+      await createAgentBenchmarkSuite({
+        name,
+        issueId,
+        caseIds: available.map((item) => item.id),
+        version: 'v1',
+        freeze: true,
+      });
+      await refreshList(selectedTraceId);
+      setNotice(`已冻结 ${available.length} 个 Validation Cases。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
+  async function handleCreateAgentEvaluationExperiment() {
+    const suite = agentBenchmarkSuites.find((item) => item.status === 'frozen');
+    if (!suite) return;
+    const issue = agentEvaluationIssues.find((item) => item.id === suite.issueId);
+    const candidate = harnessSnapshots.find((item) => item.parentId) ?? harnessSnapshots[0];
+    const baseline = harnessSnapshots.find((item) => item.id === candidate?.parentId) ?? harnessSnapshots.find((item) => item.id !== candidate?.id);
+    if (!issue || !candidate || !baseline) return;
+    const model = window.prompt('Fixed model', detail?.trace.runtime.model ?? candidate.compatibleModels[0] ?? 'kodax-model');
+    if (!model) return;
+    const provider = window.prompt('Model provider', detail?.trace.runtime.provider ?? 'configured-provider');
+    if (!provider) return;
+    setAgentEvaluationBusyKey('experiment');
+    setError(undefined);
+    try {
+      await createAgentEvaluationExperiment({
+        issueId: issue.id,
+        benchmarkSuiteId: suite.id,
+        modelSnapshot: { provider, model },
+        baselineHarnessId: baseline.id,
+        candidateHarnessId: candidate.id,
+        runtimeSnapshotHash: detail?.trace.latestSourceHash ?? 'runtime:fixed-local',
+        repetitions: 1,
+      });
+      await refreshList(selectedTraceId);
+      setNotice('H0/H1 Experiment 已创建。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
+  async function handleStartAgentEvaluationExperiment(id: string) {
+    setAgentEvaluationBusyKey(id);
+    setError(undefined);
+    try {
+      await startAgentEvaluationExperiment(id);
+      await refreshList(selectedTraceId);
+      setNotice('Experiment 已开始，可以导入成对 Rollout。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
+  async function handleImportAgentEvaluationPair(experiment: AgentEvaluationExperiment) {
+    const suite = agentBenchmarkSuites.find((item) => item.id === experiment.benchmarkSuiteId);
+    if (!suite) return;
+    const baselineStatusInput = window.prompt('H0 result for these cases: passed / failed / error', 'failed');
+    if (!baselineStatusInput) return;
+    const candidateStatusInput = window.prompt('H1 result for these cases: passed / failed / error', 'passed');
+    if (!candidateStatusInput) return;
+    const allowed = ['passed', 'failed', 'error'] as const;
+    const baselineStatus = allowed.find((item) => item === baselineStatusInput);
+    const candidateStatus = allowed.find((item) => item === candidateStatusInput);
+    if (!baselineStatus || !candidateStatus) {
+      setError('Rollout status 必须是 passed、failed 或 error。');
+      return;
+    }
+    const baselineTokens = Number(window.prompt('H0 average token usage', '1000') ?? '1000');
+    const candidateTokens = Number(window.prompt('H1 average token usage', '950') ?? '950');
+    setAgentEvaluationBusyKey(experiment.id);
+    setError(undefined);
+    try {
+      for (const caseId of suite.caseIds) {
+        for (let repetition = 1; repetition <= experiment.repetitions; repetition += 1) {
+          await recordAgentEvaluationRollout(experiment.id, {
+            arm: 'baseline',
+            caseId,
+            repetition,
+            status: baselineStatus,
+            metrics: [
+              { metricId: 'artifact_verified', value: baselineStatus === 'passed' ? 1 : 0 },
+              { metricId: 'evidence_complete', value: baselineStatus === 'passed' ? 1 : 0 },
+              { metricId: 'runtime_error', value: baselineStatus === 'error' ? 1 : 0 },
+              { metricId: 'token_usage', value: Number.isFinite(baselineTokens) ? baselineTokens : 1000 },
+            ],
+          });
+          await recordAgentEvaluationRollout(experiment.id, {
+            arm: 'candidate',
+            caseId,
+            repetition,
+            status: candidateStatus,
+            metrics: [
+              { metricId: 'artifact_verified', value: candidateStatus === 'passed' ? 1 : 0 },
+              { metricId: 'evidence_complete', value: candidateStatus === 'passed' ? 1 : 0 },
+              { metricId: 'runtime_error', value: candidateStatus === 'error' ? 1 : 0 },
+              { metricId: 'token_usage', value: Number.isFinite(candidateTokens) ? candidateTokens : 950 },
+            ],
+          });
+        }
+      }
+      await refreshList(selectedTraceId);
+      setNotice(`已导入 ${suite.caseIds.length * experiment.repetitions * 2} 条成对 Rollout。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
+  async function handleCompleteAgentEvaluationExperiment(id: string) {
+    setAgentEvaluationBusyKey(id);
+    setError(undefined);
+    try {
+      const report = await completeAgentEvaluationExperiment(id);
+      await refreshList(selectedTraceId);
+      setNotice(`Agent Evaluation 完成：${report.verdict}。`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setAgentEvaluationBusyKey(undefined);
+    }
+  }
+
   useEffect(() => {
     refreshList().catch((err) => setError(err instanceof Error ? err.message : String(err)));
   }, [params.toString()]);
@@ -10486,8 +11232,8 @@ export function App() {
             <Server size={21} />
             TraceOps
           </div>
-          <h1>KodaX Training Data Pipeline</h1>
-          <p>把本机 KodaX session 转换为 Raw Trace、Evidence、治理样本、数据集版本和训练反馈闭环。</p>
+          <h1>TraceOps v{platformArchitecture?.currentVersion ?? '0.1.0'} · Trace Data Foundation</h1>
+          <p>当前正式范围只建设 Session 接入、Trace 预处理与评测数据整理；评测和模型后训练分别进入 v0.2.0 与 v0.3.0。</p>
         </div>
         <div className="top-actions">
           <span className="pill muted-pill"><Clock3 size={14} /> {formatDate(source?.lastSyncAt)}</span>
@@ -10509,25 +11255,8 @@ export function App() {
       )}
 
       {!activePipelineStage && (
-        <PipelineOverviewPanel
-          source={source}
-          traceTotals={traceList.totals}
-          samples={sampleList.samples}
-          sampleTotals={sampleList.totals}
-          cleanTotals={cleanTraceList.totals}
-          qualitySummary={ingestQualityQueue.summary}
-          datasetVersions={datasetVersions}
-          releaseManifests={releaseManifests}
-          exportRuns={exportRuns}
-          trainingRuns={trainingRuns}
-          evalRuns={evalRuns}
-          feedbackLoops={feedbackLoops}
-          taskSummary={taskList.summary}
-          storageHealth={storageHealth}
-          auditRecords={governanceAuditLog}
-          feedbackReport={kodaxFeedbackReport}
-          syncing={syncing}
-          onSync={() => runSync('manual')}
+        <PlatformArchitectureOverviewPanel
+          architecture={platformArchitecture}
           onOpenStage={openPipelineStage}
         />
       )}
@@ -10540,14 +11269,19 @@ export function App() {
         onOpenStage={openPipelineStage}
       />
 
+      <ProductReleaseScopeBanner
+        architecture={platformArchitecture}
+        areaId={activePipelineStage.areaId}
+      />
+
       {activePipelineStageId === 'stage-ingest' && (
       <PipelineStageSection
         id="stage-ingest"
         lockedOpen
         hideHeader
         activeStageId={activePipelineStageId}
-        index="01"
-        title="数据接入"
+        index="D1"
+        title="Session 接入"
         detail="从本机 KodaX sessions 拉取完整运行记录，并把同步异常交给质量治理处理。"
         summary={`${traceList.totals.total} sessions · ${ingestQualityQueue.summary.openOccurrences} open issues`}
       >
@@ -10615,8 +11349,8 @@ export function App() {
         lockedOpen
         hideHeader
         activeStageId={activePipelineStageId}
-        index="02-03"
-        title="原始还原与证据归因"
+        index="D2"
+        title="Trace 与 Evidence"
         detail="把 session 还原成 Raw Trace、事件时间线、实体关系和 evidence 链路。"
         summary={`${traceList.totals.imported + traceList.totals.updated} traces · ${sampleList.samples.filter((sample) => sample.evidenceCount > 0).length} evidenced samples`}
       >
@@ -10649,7 +11383,7 @@ export function App() {
         <section className="stats-grid">
           <StatCard label="Total Sessions" value={traceList.totals.total} icon={<Database size={18} />} />
           <StatCard label="Imported Raw Traces" value={traceList.totals.imported} icon={<CheckCircle2 size={18} />} tone="good-stat" />
-          <StatCard label="Trainable Candidates" value={sampleList.totals.candidate} icon={<Database size={18} />} />
+          <StatCard label="Evaluation Candidates" value={sampleList.totals.candidate} icon={<Database size={18} />} />
           <StatCard label="Avg Quality" value={sampleList.totals.averageQuality} icon={<CheckCircle2 size={18} />} />
           <StatCard label="Needs Review" value={sampleList.totals.needsReview} icon={<AlertTriangle size={18} />} tone="warn-stat" />
           <StatCard label="Blocked Samples" value={sampleList.totals.blocked} icon={<ShieldAlert size={18} />} tone="danger-stat" />
@@ -10679,38 +11413,65 @@ export function App() {
       </PipelineStageSection>
       )}
 
+      {activePipelineStageId === 'stage-evaluation' && (
+      <PipelineStageSection
+        id="stage-evaluation"
+        lockedOpen
+        hideHeader
+        activeStageId={activePipelineStageId}
+        index="E1"
+        title="Agent / Harness 评测"
+        detail="固定 Model 和 Runtime，对比工程师提交的 Harness H0/H1 是否真正改善目标能力。"
+        summary={`${agentEvaluationExperiments.length} experiments · ${agentEvaluationReports.filter((item) => item.verdict === 'improved').length} improved`}
+      >
+        <section className="evaluation-scope-banner agent-scope">
+          <div>
+            <span className="section-label">Agent Evaluation Boundary</span>
+            <h2>这里评测 Harness，不评测模型</h2>
+            <p>保持 Model、Runtime 和 Validation Suite 不变，只替换 Prompt、Context、Skill、Memory、Tool 或 Workflow Harness。</p>
+          </div>
+          <div className="evaluation-scope-rules">
+            <span><strong>固定</strong><small>Model / Runtime / Benchmark</small></span>
+            <span><strong>变量</strong><small>Harness H0 / H1</small></span>
+            <span><strong>输出</strong><small>Harness Verdict</small></span>
+          </div>
+        </section>
+
+        <AgentEvaluationWorkbench
+          traces={traceList.traces}
+          harnessSnapshots={harnessSnapshots}
+          issues={agentEvaluationIssues}
+          benchmarkCases={agentBenchmarkCases}
+          benchmarkSuites={agentBenchmarkSuites}
+          experiments={agentEvaluationExperiments}
+          reports={agentEvaluationReports}
+          busyKey={agentEvaluationBusyKey}
+          onCreateHarness={handleCreateHarnessSnapshot}
+          onCreateIssue={handleCreateAgentEvaluationIssue}
+          onCreateCase={handleCreateAgentBenchmarkCase}
+          onCreateSuite={handleCreateAgentBenchmarkSuite}
+          onCreateExperiment={handleCreateAgentEvaluationExperiment}
+          onStartExperiment={handleStartAgentEvaluationExperiment}
+          onImportPairedResults={handleImportAgentEvaluationPair}
+          onCompleteExperiment={handleCompleteAgentEvaluationExperiment}
+        />
+      </PipelineStageSection>
+      )}
+
       {activePipelineStageId === 'stage-governance' && (
       <PipelineStageSection
         id="stage-governance"
         lockedOpen
         hideHeader
         activeStageId={activePipelineStageId}
-        index="04"
-        title="数据治理"
-        detail="把 Raw Trace 蒸馏成训练样本，并完成风险、证据、脱敏、Review、Repair 和记忆候选治理。"
+        index="D3"
+        title="Trace 预处理与治理"
+        detail="把 Raw Trace 清洗成评测候选，并完成风险、证据、脱敏、Review 与 Repair 治理。"
         summary={`${sampleList.totals.candidate} candidates · ${sampleList.totals.needsReview + sampleList.totals.blocked} to handle`}
       >
-        <DatasetQualityCommandCenter
-          samples={sampleList.samples}
-          cleanTraces={cleanTraceList.cleanTraces}
-          traceTotals={traceList.totals}
-          datasetVersions={datasetVersions}
-          creating={creatingDatasetVersion}
-          onReviewKind={(kind) => setReviewQueueFocus({ kind, requestedAt: Date.now() })}
-          onCreateKindVersion={handleCreateKindDatasetVersion}
-        />
-
-        <GovernanceActionPlanPanel
-          samples={sampleList.samples}
-          datasetVersions={datasetVersions}
-          creating={creatingDatasetVersion}
-          onReviewQueue={(kind, status) => setReviewQueueFocus({ kind, status, requestedAt: Date.now() })}
-          onCreateKindVersion={handleCreateKindDatasetVersion}
-          onSelectDatasetVersion={setSelectedDatasetVersionId}
-        />
-
         <ReviewQueuePanel
-          samples={sampleList.samples}
+          samples={traceFoundationSamples}
+          allowedKinds={traceFoundationDatasetKinds}
           focus={reviewQueueFocus}
           onSelectTrace={setSelectedTraceId}
           onReviewSamples={handleReviewSamples}
@@ -10725,25 +11486,15 @@ export function App() {
           onReviewKind={(kind) => setReviewQueueFocus({ kind, requestedAt: Date.now() })}
         />
 
-        <div className="pipeline-two-column">
-          <MemoryCandidateWorkbench
-            candidates={memoryCandidateList.candidates}
-            totals={memoryCandidateList.totals}
-            processingId={reviewingMemoryCandidateId}
-            onSelectTrace={setSelectedTraceId}
-            onReviewCandidate={handleReviewMemoryCandidate}
-          />
-
-          <CleanTraceWorkbench
-            cleanTraces={cleanTraceList.cleanTraces}
-            totals={cleanTraceList.totals}
-            onSelectTrace={setSelectedTraceId}
-          />
-        </div>
+        <CleanTraceWorkbench
+          cleanTraces={cleanTraceList.cleanTraces}
+          totals={cleanTraceList.totals}
+          onSelectTrace={setSelectedTraceId}
+        />
 
         <TrainingSamplesPanel
-          samples={sampleList.samples}
-          totals={sampleList.totals}
+          samples={traceFoundationSamples}
+          totals={traceFoundationSampleTotals}
           filters={filters}
           onSelectTrace={setSelectedTraceId}
         />
@@ -10756,27 +11507,29 @@ export function App() {
         lockedOpen
         hideHeader
         activeStageId={activePipelineStageId}
-        index="05"
-        title="数据集构建"
-        detail="把通过治理的 candidate samples 固化为 dataset version，并对版本差异、质量和发布门禁做审查。"
-        summary={`${datasetVersions.length} versions · ${fineTuneCandidateIds.length} fine-tune ready`}
+        index="D4"
+        title="评测数据集版本"
+        detail="把治理后的 Trace 候选固化为 evaluation dataset version，并审查版本差异、质量和 Lineage。"
+        summary={`${datasetVersions.length} versions · ${sampleList.totals.candidate} evaluation candidates`}
       >
         <DatasetBuilderPanel
           samples={sampleList.samples}
           filters={filters}
           creating={creatingDatasetVersion}
+          allowedKinds={traceFoundationDatasetKinds}
           onReviewKind={(kind) => setReviewQueueFocus({ kind, requestedAt: Date.now() })}
           onCreateKindVersion={handleCreateKindDatasetVersion}
         />
 
         <DatasetVersionsPanel
+          mode="evaluation"
           versions={datasetVersions}
           manifests={releaseManifests}
           diff={datasetVersionDiff}
           selectedId={selectedDatasetVersionId}
           selectedSamples={datasetVersionSamples}
           loadingSamples={loadingDatasetVersionSamples}
-          candidateCount={fineTuneCandidateIds.length}
+          candidateCount={sampleList.samples.filter((sample) => sample.kind === 'eval' && sample.status === 'candidate').length}
           feedbackReadyCount={feedbackLoopsReadyForDataset.length}
           creating={creatingDatasetVersion || creatingFeedbackDatasetVersion}
           generatingManifestVersionId={generatingManifestVersionId}
@@ -10809,15 +11562,47 @@ export function App() {
       </PipelineStageSection>
       )}
 
-      {activePipelineStageId === 'stage-delivery' && (
+      {activePipelineStageId === 'stage-model-evaluation' && (
       <PipelineStageSection
-        id="stage-delivery"
+        id="stage-model-evaluation"
         lockedOpen
         hideHeader
         activeStageId={activePipelineStageId}
-        index="06"
-        title="导出交付"
-        detail="把 dataset version 封装成 release manifest、导出包、训练交接和模型发布门禁。"
+        index="E2"
+        title="模型评测"
+        detail="固定 Harness 与 Benchmark，对比后训练前后的 Model Snapshot，并验证 Model × Harness 组合。"
+        summary={`${evalRuns.length} model evals · ${evalRuns.filter((run) => run.status === 'passed').length} passed`}
+      >
+        <section className="evaluation-scope-banner model-scope">
+          <div>
+            <span className="section-label">Model Evaluation Boundary</span>
+            <h2>这里评测模型，不评测 Harness</h2>
+            <p>保持 Harness、Runtime 和 Benchmark 不变，只替换 Model Snapshot；训练前后结果必须单独记录，再进行 Model × Harness 组合验证。</p>
+          </div>
+          <div className="evaluation-scope-rules">
+            <span><strong>固定</strong><small>Harness / Runtime / Benchmark</small></span>
+            <span><strong>变量</strong><small>Model Snapshot</small></span>
+            <span><strong>输出</strong><small>Model Verdict</small></span>
+          </div>
+        </section>
+
+        <EvalRunsPanel
+          evalRuns={evalRuns}
+          focusedEntity={focusedTaskEntity}
+          onSelectDatasetVersion={setSelectedDatasetVersionId}
+        />
+      </PipelineStageSection>
+      )}
+
+      {activePipelineStageId === 'stage-training' && (
+      <PipelineStageSection
+        id="stage-training"
+        lockedOpen
+        hideHeader
+        activeStageId={activePipelineStageId}
+        index="T1"
+        title="模型后训练"
+        detail="把 dataset version 封装成训练交接，启动 Provider 训练并跟踪模型产物。"
         summary={`${releaseManifests.length + exportRuns.length} release artifacts · ${trainingRuns.length} training runs`}
       >
         <ReleaseManifestsPanel
@@ -10866,20 +11651,25 @@ export function App() {
           onCreateModelReleaseGate={handleCreateModelReleaseGate}
         />
 
-        <div className="pipeline-two-column">
-          <EvalRunsPanel
-            evalRuns={evalRuns}
-            focusedEntity={focusedTaskEntity}
-            onSelectDatasetVersion={setSelectedDatasetVersionId}
-          />
+        <ExportRunsPanel
+          runs={exportRuns}
+          revokingId={revokingExportId}
+          onRevoke={handleRevokeExportRun}
+        />
+      </PipelineStageSection>
+      )}
 
-          <ExportRunsPanel
-            runs={exportRuns}
-            revokingId={revokingExportId}
-            onRevoke={handleRevokeExportRun}
-          />
-        </div>
-
+      {activePipelineStageId === 'stage-release' && (
+      <PipelineStageSection
+        id="stage-release"
+        lockedOpen
+        hideHeader
+        activeStageId={activePipelineStageId}
+        index="T2"
+        title="模型发布"
+        detail="将模型评测结论转化为 Release Gate、Deployment Handoff 和可回滚发布。"
+        summary={`${modelReleaseGates.length} release gates · ${deploymentHandoffs.length} deployment handoffs`}
+      >
         <ModelReleaseGatesPanel
           gates={modelReleaseGates}
           deploymentHandoffs={deploymentHandoffs}
@@ -10910,8 +11700,8 @@ export function App() {
         lockedOpen
         hideHeader
         activeStageId={activePipelineStageId}
-        index="07"
-        title="反馈闭环"
+        index="T3"
+        title="上线反馈闭环"
         detail="把训练、评测、部署和上线监控信号回流成下一轮数据集。"
         summary={`${feedbackLoops.length} feedback loops · ${closedLoopRetrainingPlans.length} closed-loop plans`}
       >
@@ -10977,8 +11767,8 @@ export function App() {
         lockedOpen
         hideHeader
         activeStageId={activePipelineStageId}
-        index="08"
-        title="系统治理"
+        index="P1"
+        title="平台治理"
         detail="集中查看审计、存储健康、KodaX 反哺包和自动任务编排。"
         summary={`${governanceAuditLog.length} audit events · ${storageSnapshots.length} snapshots`}
       >

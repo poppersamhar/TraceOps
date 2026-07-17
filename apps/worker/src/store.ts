@@ -5,6 +5,18 @@ import { promisify } from 'node:util';
 import { gzip, gunzip } from 'node:zlib';
 
 import type {
+  AgentBenchmarkCase,
+  AgentBenchmarkCaseCreateInput,
+  AgentBenchmarkSuite,
+  AgentBenchmarkSuiteCreateInput,
+  AgentEvaluationComparisonReport,
+  AgentEvaluationExperiment,
+  AgentEvaluationExperimentCreateInput,
+  AgentEvaluationIssue,
+  AgentEvaluationIssueCreateInput,
+  AgentEvaluationIssueStatus,
+  AgentEvaluationRollout,
+  AgentEvaluationRolloutCreateInput,
   CleanTrace,
   CleanTraceListResponse,
   DatasetClosedLoopApprovalDeploymentResult,
@@ -99,6 +111,9 @@ import type {
   GovernanceActorRole,
   GovernanceAuditRecord,
   GovernancePolicyResponse,
+  HarnessSnapshot,
+  HarnessSnapshotCreateInput,
+  HarnessSnapshotDiff,
   RawEvidence,
   RawTrace,
   RawTraceCounts,
@@ -140,6 +155,7 @@ import type {
   TraceListResponse,
 } from '../../../packages/trace-core/src/types';
 import { evaluateDatasetReleaseGate } from '../../../packages/trace-core/src/releaseGate';
+import { compareAgentEvaluation, defaultAgentEvaluationMetrics, evaluationHash } from '../../../packages/evaluation/src';
 import { aggregateRisk, scanEvidenceRisk, scanTextRisk } from '../../../packages/governance/src/risk';
 import { cleanTraceFromRawTrace } from '../../../packages/distiller/src/cleanTrace';
 import { generateMemoryCandidates } from '../../../packages/distiller/src/memoryCandidates';
@@ -164,6 +180,13 @@ interface PersistedStore {
   retrainingHandoffs: DatasetRetrainingHandoffRecord[];
   trainingRuns: DatasetTrainingRunRecord[];
   evalRuns: DatasetEvalRunRecord[];
+  harnessSnapshots: HarnessSnapshot[];
+  agentEvaluationIssues: AgentEvaluationIssue[];
+  agentBenchmarkCases: AgentBenchmarkCase[];
+  agentBenchmarkSuites: AgentBenchmarkSuite[];
+  agentEvaluationExperiments: AgentEvaluationExperiment[];
+  agentEvaluationRollouts: AgentEvaluationRollout[];
+  agentEvaluationReports: AgentEvaluationComparisonReport[];
   modelReleaseGates: DatasetModelReleaseGateRecord[];
   deploymentHandoffs: DatasetDeploymentHandoffRecord[];
   postReleaseMonitors: DatasetPostReleaseMonitorRecord[];
@@ -705,6 +728,13 @@ export class TraceOpsStore {
       retrainingHandoffs: [],
       trainingRuns: [],
       evalRuns: [],
+      harnessSnapshots: [],
+      agentEvaluationIssues: [],
+      agentBenchmarkCases: [],
+      agentBenchmarkSuites: [],
+      agentEvaluationExperiments: [],
+      agentEvaluationRollouts: [],
+      agentEvaluationReports: [],
       modelReleaseGates: [],
       deploymentHandoffs: [],
       postReleaseMonitors: [],
@@ -771,6 +801,13 @@ export class TraceOpsStore {
       retrainingHandoffs: parsed.retrainingHandoffs ?? [],
       trainingRuns: parsed.trainingRuns ?? [],
       evalRuns: parsed.evalRuns ?? [],
+      harnessSnapshots: parsed.harnessSnapshots ?? [],
+      agentEvaluationIssues: parsed.agentEvaluationIssues ?? [],
+      agentBenchmarkCases: parsed.agentBenchmarkCases ?? [],
+      agentBenchmarkSuites: parsed.agentBenchmarkSuites ?? [],
+      agentEvaluationExperiments: parsed.agentEvaluationExperiments ?? [],
+      agentEvaluationRollouts: parsed.agentEvaluationRollouts ?? [],
+      agentEvaluationReports: parsed.agentEvaluationReports ?? [],
       modelReleaseGates: parsed.modelReleaseGates ?? [],
       deploymentHandoffs: parsed.deploymentHandoffs ?? [],
       postReleaseMonitors: parsed.postReleaseMonitors ?? [],
@@ -4797,6 +4834,411 @@ export class TraceOpsStore {
     }
     await this.save();
     return nextRun;
+  }
+
+  private appendAgentEvaluationAudit(action: string, reason: string, metadata: Record<string, unknown>): void {
+    this.data.governanceAuditRecords.unshift({
+      id: `audit_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      action,
+      decision: 'recorded',
+      actor: { id: 'traceops-agent-eval', role: 'local_admin', displayName: 'Agent Evaluation' },
+      entityRefs: [],
+      reason,
+      metadata,
+      occurredAt: new Date().toISOString(),
+    });
+    this.data.governanceAuditRecords = this.data.governanceAuditRecords.slice(0, this.getGovernancePolicy().auditRetentionLimit);
+  }
+
+  listHarnessSnapshots(): HarnessSnapshot[] {
+    return this.data.harnessSnapshots.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getHarnessSnapshot(id: string): HarnessSnapshot | undefined {
+    return this.data.harnessSnapshots.find((snapshot) => snapshot.id === id);
+  }
+
+  async createHarnessSnapshot(input: HarnessSnapshotCreateInput): Promise<HarnessSnapshot> {
+    const name = input.name.trim();
+    const version = input.version.trim();
+    if (!name || !version) throw new Error('Harness name and version are required.');
+    if (input.parentId && !this.getHarnessSnapshot(input.parentId)) throw new Error('Parent Harness snapshot was not found.');
+    const createdAt = new Date().toISOString();
+    const identity = {
+      name,
+      version,
+      parentId: input.parentId,
+      source: input.source ?? {},
+      components: input.components ?? {},
+      compatibleModels: Array.from(new Set(input.compatibleModels ?? [])).sort(),
+      changeSummary: input.changeSummary?.trim() || undefined,
+      sourceTraceIds: Array.from(new Set(input.sourceTraceIds ?? [])).sort(),
+    };
+    const contentHash = evaluationHash(identity);
+    const duplicate = this.data.harnessSnapshots.find((snapshot) => snapshot.contentHash === contentHash);
+    if (duplicate) return duplicate;
+    const snapshot: HarnessSnapshot = {
+      id: `harness_${stableShortHash(identity)}`,
+      ...identity,
+      status: input.status ?? 'candidate',
+      contentHash,
+      createdBy: input.createdBy?.trim() || 'local-engineer',
+      createdAt,
+      updatedAt: createdAt,
+    };
+    this.data.harnessSnapshots.unshift(snapshot);
+    this.appendAgentEvaluationAudit('agent_eval.harness_snapshot_created', `Created Harness snapshot ${snapshot.name} ${snapshot.version}.`, {
+      harnessSnapshotId: snapshot.id,
+      contentHash,
+      parentId: snapshot.parentId,
+    });
+    await this.save();
+    return snapshot;
+  }
+
+  getHarnessSnapshotDiff(headId: string, baseId?: string): HarnessSnapshotDiff | undefined {
+    const head = this.getHarnessSnapshot(headId);
+    if (!head) return undefined;
+    const base = this.getHarnessSnapshot(baseId ?? head.parentId ?? '');
+    if (!base) return undefined;
+    const componentKeys = Object.keys({ ...base.components, ...head.components }) as Array<keyof HarnessSnapshot['components']>;
+    return {
+      baseId: base.id,
+      headId: head.id,
+      changedComponents: componentKeys
+        .filter((component) => base.components[component] !== head.components[component])
+        .map((component) => ({ component, before: base.components[component], after: head.components[component] })),
+      sourceChanged: stableHash(base.source) !== stableHash(head.source),
+      compatibleModelsChanged: stableHash(base.compatibleModels) !== stableHash(head.compatibleModels),
+    };
+  }
+
+  listAgentEvaluationIssues(): AgentEvaluationIssue[] {
+    return this.data.agentEvaluationIssues.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getAgentEvaluationIssue(id: string): AgentEvaluationIssue | undefined {
+    return this.data.agentEvaluationIssues.find((issue) => issue.id === id);
+  }
+
+  async createAgentEvaluationIssue(input: AgentEvaluationIssueCreateInput): Promise<AgentEvaluationIssue> {
+    const title = input.title.trim();
+    if (!title) throw new Error('Evaluation issue title is required.');
+    const sourceTraceIds = Array.from(new Set(input.sourceTraceIds ?? []));
+    const missingTrace = sourceTraceIds.find((id) => !this.data.traces.some((trace) => trace.id === id));
+    if (missingTrace) throw new Error(`Source trace ${missingTrace} was not found.`);
+    const createdAt = new Date().toISOString();
+    const issue: AgentEvaluationIssue = {
+      id: `agent_eval_issue_${stableShortHash({ title, sourceTraceIds, createdAt })}`,
+      title,
+      description: input.description?.trim() || '',
+      category: input.category ?? 'other',
+      scopeTags: Array.from(new Set(input.scopeTags ?? [])),
+      sourceTraceIds,
+      primaryMetricId: input.primaryMetricId?.trim() || 'task_success',
+      owner: input.owner?.trim() || 'local-engineer',
+      status: 'open',
+      createdAt,
+      updatedAt: createdAt,
+    };
+    this.data.agentEvaluationIssues.unshift(issue);
+    this.appendAgentEvaluationAudit('agent_eval.issue_created', `Created Agent Evaluation issue ${issue.title}.`, { issueId: issue.id, sourceTraceIds });
+    await this.save();
+    return issue;
+  }
+
+  async updateAgentEvaluationIssue(id: string, input: Partial<Pick<AgentEvaluationIssue, 'title' | 'description' | 'category' | 'scopeTags' | 'primaryMetricId' | 'owner' | 'status'>>): Promise<AgentEvaluationIssue | undefined> {
+    const issue = this.getAgentEvaluationIssue(id);
+    if (!issue) return undefined;
+    const status: AgentEvaluationIssueStatus = input.status ?? issue.status;
+    const next: AgentEvaluationIssue = {
+      ...issue,
+      title: input.title?.trim() || issue.title,
+      description: input.description?.trim() ?? issue.description,
+      category: input.category ?? issue.category,
+      scopeTags: input.scopeTags ? Array.from(new Set(input.scopeTags)) : issue.scopeTags,
+      primaryMetricId: input.primaryMetricId?.trim() || issue.primaryMetricId,
+      owner: input.owner?.trim() || issue.owner,
+      status,
+      updatedAt: new Date().toISOString(),
+    };
+    this.data.agentEvaluationIssues = this.data.agentEvaluationIssues.map((item) => item.id === id ? next : item);
+    this.appendAgentEvaluationAudit('agent_eval.issue_updated', `Updated Agent Evaluation issue ${next.title}.`, { issueId: id, status });
+    await this.save();
+    return next;
+  }
+
+  listAgentBenchmarkCases(): AgentBenchmarkCase[] {
+    return this.data.agentBenchmarkCases.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getAgentBenchmarkCase(id: string): AgentBenchmarkCase | undefined {
+    return this.data.agentBenchmarkCases.find((item) => item.id === id);
+  }
+
+  async createAgentBenchmarkCase(input: AgentBenchmarkCaseCreateInput): Promise<AgentBenchmarkCase> {
+    const title = input.title.trim();
+    if (!title) throw new Error('Benchmark case title is required.');
+    if (input.sourceTraceId && !this.data.traces.some((trace) => trace.id === input.sourceTraceId)) {
+      throw new Error('Source trace was not found.');
+    }
+    const createdAt = new Date().toISOString();
+    const benchmarkCase: AgentBenchmarkCase = {
+      id: `agent_case_${stableShortHash({ title, sourceTraceId: input.sourceTraceId, createdAt })}`,
+      sourceTraceId: input.sourceTraceId,
+      usage: input.usage ?? 'validation',
+      title,
+      taskType: input.taskType?.trim() || 'general',
+      scopeTags: Array.from(new Set(input.scopeTags ?? [])),
+      inputRef: input.inputRef?.trim() || (input.sourceTraceId ? `clean-trace:${input.sourceTraceId}` : ''),
+      environmentRef: input.environmentRef?.trim() || undefined,
+      expectedArtifactRefs: Array.from(new Set(input.expectedArtifactRefs ?? [])),
+      grader: input.grader ?? { kind: 'manual', version: 'manual-v1' },
+      critical: input.critical ?? false,
+      riskLevel: input.riskLevel ?? 'L1',
+      status: input.status ?? 'ready',
+      createdBy: input.createdBy?.trim() || 'local-curator',
+      createdAt,
+      updatedAt: createdAt,
+    };
+    this.data.agentBenchmarkCases.unshift(benchmarkCase);
+    this.appendAgentEvaluationAudit('agent_eval.benchmark_case_created', `Created validation case ${benchmarkCase.title}.`, {
+      benchmarkCaseId: benchmarkCase.id,
+      usage: benchmarkCase.usage,
+      sourceTraceId: benchmarkCase.sourceTraceId,
+    });
+    await this.save();
+    return benchmarkCase;
+  }
+
+  async createAgentBenchmarkCaseFromTrace(traceId: string, input: Partial<AgentBenchmarkCaseCreateInput> = {}): Promise<AgentBenchmarkCase> {
+    const trace = this.data.traces.find((item) => item.id === traceId);
+    if (!trace) throw new Error('Trace was not found.');
+    return this.createAgentBenchmarkCase({
+      title: input.title?.trim() || trace.title,
+      taskType: input.taskType ?? 'kodax-task',
+      sourceTraceId: trace.id,
+      usage: input.usage ?? 'validation',
+      scopeTags: input.scopeTags ?? [trace.projectKey, trace.runtime.surface].filter((item): item is string => Boolean(item)),
+      inputRef: input.inputRef ?? `clean-trace:${trace.id}`,
+      environmentRef: input.environmentRef,
+      expectedArtifactRefs: input.expectedArtifactRefs ?? this.data.evidence
+        .filter((item) => item.traceId === trace.id)
+        .slice(0, 20)
+        .map((item) => item.id),
+      grader: input.grader ?? { kind: 'trace_signal', version: 'trace-signal-v1' },
+      critical: input.critical,
+      riskLevel: input.riskLevel ?? trace.risk.level,
+      status: input.status ?? 'ready',
+      createdBy: input.createdBy,
+    });
+  }
+
+  listAgentBenchmarkSuites(): AgentBenchmarkSuite[] {
+    return this.data.agentBenchmarkSuites.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getAgentBenchmarkSuite(id: string): AgentBenchmarkSuite | undefined {
+    return this.data.agentBenchmarkSuites.find((item) => item.id === id);
+  }
+
+  async createAgentBenchmarkSuite(input: AgentBenchmarkSuiteCreateInput): Promise<AgentBenchmarkSuite> {
+    if (!this.getAgentEvaluationIssue(input.issueId)) throw new Error('Evaluation issue was not found.');
+    const name = input.name.trim();
+    if (!name) throw new Error('Benchmark suite name is required.');
+    const caseIds = Array.from(new Set(input.caseIds ?? []));
+    const cases = caseIds.map((id) => this.getAgentBenchmarkCase(id));
+    if (cases.some((item) => !item)) throw new Error('One or more benchmark cases were not found.');
+    if (input.freeze && cases.some((item) => item?.usage !== 'validation' || item.status !== 'ready')) {
+      throw new Error('Frozen validation suites may only contain ready validation cases.');
+    }
+    const createdAt = new Date().toISOString();
+    const snapshotIdentity = { name, issueId: input.issueId, caseIds, version: input.version ?? 'v1', purpose: 'update_validation' };
+    const suite: AgentBenchmarkSuite = {
+      id: `agent_suite_${stableShortHash({ ...snapshotIdentity, createdAt })}`,
+      name,
+      purpose: 'update_validation',
+      issueId: input.issueId,
+      caseIds,
+      version: input.version?.trim() || 'v1',
+      status: input.freeze ? 'frozen' : 'draft',
+      snapshotHash: input.freeze ? evaluationHash(snapshotIdentity) : undefined,
+      createdBy: input.createdBy?.trim() || 'local-curator',
+      createdAt,
+      updatedAt: createdAt,
+    };
+    this.data.agentBenchmarkSuites.unshift(suite);
+    this.appendAgentEvaluationAudit('agent_eval.benchmark_suite_created', `Created benchmark suite ${suite.name}.`, {
+      benchmarkSuiteId: suite.id,
+      status: suite.status,
+      caseCount: suite.caseIds.length,
+    });
+    await this.save();
+    return suite;
+  }
+
+  listAgentEvaluationExperiments(): AgentEvaluationExperiment[] {
+    return this.data.agentEvaluationExperiments.slice().sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  getAgentEvaluationExperiment(id: string): AgentEvaluationExperiment | undefined {
+    return this.data.agentEvaluationExperiments.find((item) => item.id === id);
+  }
+
+  async createAgentEvaluationExperiment(input: AgentEvaluationExperimentCreateInput): Promise<AgentEvaluationExperiment> {
+    const issue = this.getAgentEvaluationIssue(input.issueId);
+    const suite = this.getAgentBenchmarkSuite(input.benchmarkSuiteId);
+    const baseline = this.getHarnessSnapshot(input.baselineHarnessId);
+    const candidate = this.getHarnessSnapshot(input.candidateHarnessId);
+    if (!issue || !suite || !baseline || !candidate) throw new Error('Issue, suite, baseline Harness, and candidate Harness are required.');
+    if (suite.status !== 'frozen') throw new Error('Experiments require a frozen benchmark suite.');
+    if (suite.issueId !== issue.id) throw new Error('Benchmark suite does not belong to the selected issue.');
+    if (baseline.id === candidate.id) throw new Error('Baseline and candidate Harness must differ.');
+    const suiteCases = suite.caseIds.map((id) => this.getAgentBenchmarkCase(id));
+    if (suiteCases.length === 0 || suiteCases.some((item) => !item || item.usage !== 'validation')) {
+      throw new Error('Experiment suite must contain validation cases only.');
+    }
+    const createdAt = new Date().toISOString();
+    const metrics = input.metrics?.length ? input.metrics : defaultAgentEvaluationMetrics;
+    if (!metrics.some((metric) => metric.role === 'primary')) throw new Error('At least one primary metric is required.');
+    const identity = {
+      issueId: issue.id,
+      benchmarkSuiteId: suite.id,
+      benchmarkSnapshotHash: suite.snapshotHash,
+      modelSnapshot: input.modelSnapshot,
+      baselineHarnessId: baseline.id,
+      candidateHarnessId: candidate.id,
+      runtimeSnapshotHash: input.runtimeSnapshotHash ?? 'runtime:unspecified',
+      evaluatorVersion: input.evaluatorVersion ?? 'traceops-agent-eval-v1',
+      repetitions: Math.max(1, Math.min(20, Math.round(input.repetitions ?? 1))),
+      metrics,
+    };
+    const experiment: AgentEvaluationExperiment = {
+      id: `agent_experiment_${stableShortHash({ ...identity, createdAt })}`,
+      ...identity,
+      status: 'draft',
+      experimentHash: evaluationHash(identity),
+      createdBy: input.createdBy?.trim() || 'local-engineer',
+      createdAt,
+      updatedAt: createdAt,
+    };
+    this.data.agentEvaluationExperiments.unshift(experiment);
+    if (issue.status === 'open') {
+      this.data.agentEvaluationIssues = this.data.agentEvaluationIssues.map((item) => item.id === issue.id
+        ? { ...item, status: 'evaluating', updatedAt: createdAt }
+        : item);
+    }
+    this.appendAgentEvaluationAudit('agent_eval.experiment_created', `Created H0/H1 experiment ${experiment.id}.`, {
+      experimentId: experiment.id,
+      baselineHarnessId: baseline.id,
+      candidateHarnessId: candidate.id,
+      benchmarkSuiteId: suite.id,
+      model: input.modelSnapshot.model,
+    });
+    await this.save();
+    return experiment;
+  }
+
+  async startAgentEvaluationExperiment(id: string): Promise<AgentEvaluationExperiment | undefined> {
+    const experiment = this.getAgentEvaluationExperiment(id);
+    if (!experiment) return undefined;
+    if (experiment.status !== 'draft') throw new Error('Only draft experiments can be started.');
+    const startedAt = new Date().toISOString();
+    const next: AgentEvaluationExperiment = { ...experiment, status: 'running', startedAt, updatedAt: startedAt };
+    this.data.agentEvaluationExperiments = this.data.agentEvaluationExperiments.map((item) => item.id === id ? next : item);
+    this.appendAgentEvaluationAudit('agent_eval.experiment_started', `Started H0/H1 experiment ${id}.`, { experimentId: id });
+    await this.save();
+    return next;
+  }
+
+  listAgentEvaluationRollouts(experimentId?: string): AgentEvaluationRollout[] {
+    return this.data.agentEvaluationRollouts
+      .filter((item) => !experimentId || item.experimentId === experimentId)
+      .slice()
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  async recordAgentEvaluationRollout(experimentId: string, input: AgentEvaluationRolloutCreateInput): Promise<AgentEvaluationRollout> {
+    const experiment = this.getAgentEvaluationExperiment(experimentId);
+    if (!experiment) throw new Error('Evaluation experiment was not found.');
+    if (experiment.status !== 'running') throw new Error('Rollouts can only be recorded for a running experiment.');
+    const suite = this.getAgentBenchmarkSuite(experiment.benchmarkSuiteId);
+    if (!suite?.caseIds.includes(input.caseId)) throw new Error('Benchmark case does not belong to the experiment suite.');
+    const repetition = Math.max(1, Math.round(input.repetition ?? 1));
+    if (repetition > experiment.repetitions) throw new Error('Rollout repetition exceeds the experiment plan.');
+    const createdAt = new Date().toISOString();
+    const key = { experimentId, arm: input.arm, caseId: input.caseId, repetition };
+    const existing = this.data.agentEvaluationRollouts.find((item) =>
+      item.experimentId === experimentId && item.arm === input.arm && item.caseId === input.caseId && item.repetition === repetition
+    );
+    const rollout: AgentEvaluationRollout = {
+      id: existing?.id ?? `agent_rollout_${stableShortHash(key)}`,
+      ...key,
+      sourceTraceId: input.sourceTraceId,
+      status: input.status,
+      metrics: input.metrics ?? [],
+      evidenceIds: Array.from(new Set(input.evidenceIds ?? [])),
+      note: input.note?.trim() || undefined,
+      createdBy: input.createdBy?.trim() || 'external-kodax-runner',
+      createdAt: existing?.createdAt ?? createdAt,
+      updatedAt: createdAt,
+    };
+    this.data.agentEvaluationRollouts = existing
+      ? this.data.agentEvaluationRollouts.map((item) => item.id === existing.id ? rollout : item)
+      : [rollout, ...this.data.agentEvaluationRollouts];
+    this.appendAgentEvaluationAudit('agent_eval.rollout_recorded', `Recorded ${input.arm} rollout for ${input.caseId}.`, {
+      experimentId,
+      rolloutId: rollout.id,
+      arm: input.arm,
+      caseId: input.caseId,
+      status: input.status,
+    });
+    await this.save();
+    return rollout;
+  }
+
+  getAgentEvaluationReport(experimentId: string): AgentEvaluationComparisonReport | undefined {
+    return this.data.agentEvaluationReports.find((item) => item.experimentId === experimentId);
+  }
+
+  listAgentEvaluationReports(): AgentEvaluationComparisonReport[] {
+    return this.data.agentEvaluationReports.slice().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+
+  async completeAgentEvaluationExperiment(id: string): Promise<AgentEvaluationComparisonReport | undefined> {
+    const experiment = this.getAgentEvaluationExperiment(id);
+    if (!experiment) return undefined;
+    if (experiment.status !== 'running') throw new Error('Only running experiments can be completed.');
+    const suite = this.getAgentBenchmarkSuite(experiment.benchmarkSuiteId);
+    if (!suite) throw new Error('Benchmark suite was not found.');
+    const cases = suite.caseIds.map((caseId) => this.getAgentBenchmarkCase(caseId)).filter((item): item is AgentBenchmarkCase => Boolean(item));
+    const rollouts = this.listAgentEvaluationRollouts(id);
+    const expected = cases.length * experiment.repetitions;
+    const baselineCount = rollouts.filter((item) => item.arm === 'baseline').length;
+    const candidateCount = rollouts.filter((item) => item.arm === 'candidate').length;
+    if (baselineCount < expected || candidateCount < expected) {
+      throw new Error(`Experiment requires ${expected} rollout(s) per arm before completion.`);
+    }
+    const completedAt = new Date().toISOString();
+    const report = compareAgentEvaluation({ experiment, cases, rollouts, createdAt: completedAt });
+    this.data.agentEvaluationReports = [report, ...this.data.agentEvaluationReports.filter((item) => item.experimentId !== id)];
+    this.data.agentEvaluationExperiments = this.data.agentEvaluationExperiments.map((item) => item.id === id
+      ? { ...item, status: 'completed', completedAt, updatedAt: completedAt }
+      : item);
+    const issue = this.getAgentEvaluationIssue(experiment.issueId);
+    if (issue) {
+      this.data.agentEvaluationIssues = this.data.agentEvaluationIssues.map((item) => item.id === issue.id
+        ? { ...item, status: report.verdict === 'improved' ? 'validated' : report.verdict === 'regressed' ? 'rejected' : 'evaluating', updatedAt: completedAt }
+        : item);
+    }
+    this.appendAgentEvaluationAudit('agent_eval.experiment_completed', `Completed H0/H1 experiment ${id} with verdict ${report.verdict}.`, {
+      experimentId: id,
+      reportId: report.id,
+      reportHash: report.reportHash,
+      verdict: report.verdict,
+    });
+    await this.save();
+    return report;
   }
 
   listEvalRuns(): DatasetEvalRunRecord[] {

@@ -17,6 +17,7 @@ export interface KodaXSessionSummary {
   id: string;
   filePath: string;
   projectKey?: string;
+  tag?: string;
   title: string;
   msgCount: number;
   createdAt?: string;
@@ -39,6 +40,7 @@ export interface KodaXFullSession {
   id: string;
   filePath: string;
   projectKey?: string;
+  tag?: string;
   title: string;
   gitRoot: string;
   createdAt?: string;
@@ -74,7 +76,14 @@ export interface KodaXRuntimeFileBatch {
 }
 
 export function resolveKodaXSessionsDir(): string {
-  return process.env.KODAX_SESSIONS_DIR ?? path.join(os.homedir(), '.kodax', 'sessions');
+  if (process.env.KODAX_SESSIONS_DIR) return path.resolve(process.env.KODAX_SESSIONS_DIR);
+  if (process.env.KODAX_PROFILE_DIR && path.isAbsolute(process.env.KODAX_PROFILE_DIR)) {
+    return path.join(path.resolve(process.env.KODAX_PROFILE_DIR), 'sessions');
+  }
+  if (process.env.KODAX_HOME && path.isAbsolute(process.env.KODAX_HOME)) {
+    return path.join(path.resolve(process.env.KODAX_HOME), 'sessions');
+  }
+  return path.join(os.homedir(), '.kodax', 'sessions');
 }
 
 function isSessionJsonl(name: string): boolean {
@@ -567,6 +576,7 @@ function normalizeSessionRecords(sessionsDir: string, filePath: string, records:
     id,
     filePath,
     projectKey,
+    tag: readString(lastMetaUpdate, 'tag') ?? readString(meta, 'tag'),
     title,
     gitRoot,
     createdAt: readString(meta, 'createdAt'),
@@ -599,6 +609,7 @@ export async function listKodaXSessions(sessionsDir = resolveKodaXSessionsDir())
         id: readString(first, 'id') ?? path.basename(file, '.jsonl'),
         filePath: file,
         projectKey: projectKeyFromFile(sessionsDir, file),
+        tag: readString(first, 'tag'),
         title: readString(first, 'title') ?? 'Untitled KodaX session',
         msgCount: typeof first.activeMessageCount === 'number' ? first.activeMessageCount : 0,
         createdAt: readString(first, 'createdAt'),

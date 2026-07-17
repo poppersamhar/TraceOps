@@ -19,7 +19,7 @@ const levelWeight: Record<RiskLevel, number> = {
 
 const sourceFilePattern = /\.(ts|tsx|js|jsx|py|go|rs|java|cpp|c|h|css|scss|json|yaml|yml|md)$/i;
 const localPathPattern = /(^|\s)(\/Users\/|\/home\/|\/var\/|\/tmp\/|[A-Za-z]:\\)/;
-const credentialPattern = /(\.env|api[_-]?key\s*[:=]|secret\s*[:=]|token\s*[:=]|password\s*[:=]|credentials?\s*[:=]|sk-[A-Za-z0-9_-]{12,})/i;
+const credentialPattern = /(\.env|(?:api[_-]?key|secret|token|password|credentials?)\s*['"]?\s*[:=]|sk-[A-Za-z0-9_-]{12,})/i;
 const customerPattern = /(客户|合同|报价|发票|订单|customer|contract|invoice|quote|deal)/i;
 const accountPattern = /(cookie|登录|账号|account|browser|connector|oauth|pat\b)/i;
 

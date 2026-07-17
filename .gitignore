@@ -3,6 +3,7 @@ dist/
 .traceops/
 .playwright-cli/
 output/
+artifacts/
 .vercel/
 .env
 .env.*

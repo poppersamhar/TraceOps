@@ -1,5 +1,6 @@
 import cors from 'cors';
 import express, { type Request, type Response } from 'express';
+import path from 'node:path';
 
 import {
   loadKodaXRuntimeFiles,
@@ -11,6 +12,13 @@ import {
 import { normalizeKodaXSession } from '../../../packages/kodax-connector/src/normalizer';
 import { exportTrainingSamples, normalizeDatasetExportFormat } from '../../../packages/exporters/src/jsonl';
 import type {
+  AgentBenchmarkCaseCreateInput,
+  AgentBenchmarkSuiteCreateInput,
+  AgentEvaluationExperimentCreateInput,
+  AgentEvaluationIssue,
+  AgentEvaluationIssueCreateInput,
+  AgentEvaluationMetricDefinition,
+  AgentEvaluationRolloutCreateInput,
   DatasetClosedLoopFeedbackSignalMode,
   DatasetDeploymentHandoffStatus,
   DatasetFeedbackLoopDecision,
@@ -23,6 +31,7 @@ import type {
   DatasetVersionDiffReviewDecision,
   GovernanceActor,
   GovernanceActorRole,
+  HarnessSnapshotCreateInput,
   IngestDiagnosticTriageDecision,
   IngestQualityPolicyAction,
   IngestQualityRecommendationDecisionInput,
@@ -43,9 +52,12 @@ import type {
   TraceOpsTaskRecord,
   TraceOpsTaskRunResponse,
 } from '../../../packages/trace-core/src/types';
+import { createPlatformArchitectureRouter } from './modules/platformArchitecture';
+import { createSpaceCollectorV01Router } from './modules/spaceCollectorV01';
 import { TraceOpsStore } from './store';
 
 const port = Number(process.env.TRACEOPS_API_PORT ?? 4177);
+const productMode = process.env.TRACEOPS_PRODUCT_MODE ?? '0.1.0';
 const sessionsDir = resolveKodaXSessionsDir();
 const watchIntervalMs = Number(process.env.TRACEOPS_WATCH_INTERVAL_MS ?? 30_000);
 const taskExecutorIntervalMs = Number(process.env.TRACEOPS_TASK_EXECUTOR_INTERVAL_MS ?? 12_000);
@@ -250,6 +262,38 @@ function normalizedString(value: unknown, max = 500): string | undefined {
   if (typeof value !== 'string') return undefined;
   const next = value.trim();
   return next ? next.slice(0, max) : undefined;
+}
+
+function normalizedStringArray(value: unknown, maxItems = 100, maxLength = 500): string[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value
+    .map((item) => normalizedString(item, maxLength))
+    .filter((item): item is string => Boolean(item))))
+    .slice(0, maxItems);
+}
+
+function normalizeAgentMetric(value: unknown): AgentEvaluationMetricDefinition | undefined {
+  if (!isRuntimeRecord(value)) return undefined;
+  const id = normalizedString(value.id, 120);
+  const label = normalizedString(value.label, 180);
+  if (!id || !label) return undefined;
+  const unit = value.unit === 'score' || value.unit === 'percent' || value.unit === 'count' || value.unit === 'tokens' || value.unit === 'ms'
+    ? value.unit
+    : 'score';
+  const direction = value.direction === 'decrease' ? 'decrease' : 'increase';
+  const aggregation = value.aggregation === 'sum' || value.aggregation === 'rate' ? value.aggregation : 'mean';
+  const role = value.role === 'primary' || value.role === 'guardrail' || value.role === 'diagnostic' ? value.role : 'diagnostic';
+  return {
+    id,
+    label,
+    unit,
+    direction,
+    aggregation,
+    role,
+    targetDelta: finiteNumber(value.targetDelta),
+    maxCandidateValue: finiteNumber(value.maxCandidateValue),
+    maxDelta: finiteNumber(value.maxDelta),
+  };
 }
 
 function requestHeader(req: Request, name: string): string | undefined {
@@ -1315,8 +1359,14 @@ async function runTaskExecutorTick() {
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+app.use('/api/v0.1/collector', createSpaceCollectorV01Router());
+app.use('/api/platform', createPlatformArchitectureRouter(store));
 
 app.get('/', (_req, res) => {
+  if (process.env.TRACEOPS_SERVE_COLLECTOR === 'true') {
+    res.sendFile(path.resolve(process.cwd(), 'dist/v0.1.0/index.html'));
+    return;
+  }
   res.type('html').send(`
     <!doctype html>
     <html lang="zh-CN">
@@ -1539,6 +1589,351 @@ app.post('/api/runtime/kodax/events', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
   }
+});
+
+app.get('/api/harness-snapshots', (_req, res) => {
+  res.json(store.listHarnessSnapshots());
+});
+
+app.post('/api/harness-snapshots', async (req, res) => {
+  if (!isRuntimeRecord(req.body)) {
+    res.status(400).json({ error: 'A Harness snapshot payload is required.' });
+    return;
+  }
+  const name = normalizedString(req.body.name, 180);
+  const version = normalizedString(req.body.version, 120);
+  if (!name || !version) {
+    res.status(400).json({ error: 'Harness name and version are required.' });
+    return;
+  }
+  const source = isRuntimeRecord(req.body.source) ? req.body.source : {};
+  const components = isRuntimeRecord(req.body.components) ? req.body.components : {};
+  const input: HarnessSnapshotCreateInput = {
+    name,
+    version,
+    parentId: normalizedString(req.body.parentId, 160),
+    status: req.body.status === 'draft' || req.body.status === 'active' || req.body.status === 'archived' ? req.body.status : 'candidate',
+    source: {
+      repository: normalizedString(source.repository, 500),
+      commit: normalizedString(source.commit, 180),
+      profileId: normalizedString(source.profileId, 180),
+      profileVersion: normalizedString(source.profileVersion, 120),
+    },
+    components: {
+      promptHash: normalizedString(components.promptHash, 200),
+      contextPolicyHash: normalizedString(components.contextPolicyHash, 200),
+      skillManifestHash: normalizedString(components.skillManifestHash, 200),
+      memoryPolicyHash: normalizedString(components.memoryPolicyHash, 200),
+      toolRegistryHash: normalizedString(components.toolRegistryHash, 200),
+      workflowHash: normalizedString(components.workflowHash, 200),
+      verifierHash: normalizedString(components.verifierHash, 200),
+      runtimePolicyHash: normalizedString(components.runtimePolicyHash, 200),
+    },
+    compatibleModels: normalizedStringArray(req.body.compatibleModels, 50, 180),
+    changeSummary: normalizedString(req.body.changeSummary, 2000),
+    sourceTraceIds: normalizedStringArray(req.body.sourceTraceIds, 100, 180),
+    createdBy: normalizedString(req.body.createdBy, 120),
+  };
+  try {
+    res.status(201).json(await store.createHarnessSnapshot(input));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/harness-snapshots/:id', (req, res) => {
+  const snapshot = store.getHarnessSnapshot(req.params.id);
+  if (!snapshot) {
+    res.status(404).json({ error: 'Harness snapshot was not found.' });
+    return;
+  }
+  res.json(snapshot);
+});
+
+app.get('/api/harness-snapshots/:id/diff', (req, res) => {
+  const diff = store.getHarnessSnapshotDiff(req.params.id, normalizedString(req.query.baseId, 180));
+  if (!diff) {
+    res.status(404).json({ error: 'Harness diff could not be created.' });
+    return;
+  }
+  res.json(diff);
+});
+
+app.get('/api/agent-eval/issues', (_req, res) => {
+  res.json(store.listAgentEvaluationIssues());
+});
+
+app.post('/api/agent-eval/issues', async (req, res) => {
+  if (!isRuntimeRecord(req.body) || !normalizedString(req.body.title, 180)) {
+    res.status(400).json({ error: 'Evaluation issue title is required.' });
+    return;
+  }
+  const category = req.body.category;
+  const input: AgentEvaluationIssueCreateInput = {
+    title: normalizedString(req.body.title, 180)!,
+    description: normalizedString(req.body.description, 3000),
+    category: category === 'context' || category === 'skill' || category === 'memory' || category === 'tool_use'
+      || category === 'planning' || category === 'verification' || category === 'runtime' ? category : 'other',
+    scopeTags: normalizedStringArray(req.body.scopeTags, 100, 120),
+    sourceTraceIds: normalizedStringArray(req.body.sourceTraceIds, 100, 180),
+    primaryMetricId: normalizedString(req.body.primaryMetricId, 120),
+    owner: normalizedString(req.body.owner, 120),
+  };
+  try {
+    res.status(201).json(await store.createAgentEvaluationIssue(input));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/agent-eval/issues/:id', (req, res) => {
+  const issue = store.getAgentEvaluationIssue(req.params.id);
+  if (!issue) {
+    res.status(404).json({ error: 'Evaluation issue was not found.' });
+    return;
+  }
+  res.json(issue);
+});
+
+app.patch('/api/agent-eval/issues/:id', async (req, res) => {
+  if (!isRuntimeRecord(req.body)) {
+    res.status(400).json({ error: 'Evaluation issue update is required.' });
+    return;
+  }
+  const status: AgentEvaluationIssue['status'] | undefined = req.body.status === 'open' || req.body.status === 'evaluating'
+    || req.body.status === 'validated' || req.body.status === 'rejected' ? req.body.status : undefined;
+  try {
+    const issue = await store.updateAgentEvaluationIssue(req.params.id, {
+      title: normalizedString(req.body.title, 180),
+      description: normalizedString(req.body.description, 3000),
+      scopeTags: Array.isArray(req.body.scopeTags) ? normalizedStringArray(req.body.scopeTags, 100, 120) : undefined,
+      primaryMetricId: normalizedString(req.body.primaryMetricId, 120),
+      owner: normalizedString(req.body.owner, 120),
+      status,
+    });
+    if (!issue) {
+      res.status(404).json({ error: 'Evaluation issue was not found.' });
+      return;
+    }
+    res.json(issue);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/agent-eval/benchmark-cases', (_req, res) => {
+  res.json(store.listAgentBenchmarkCases());
+});
+
+app.post('/api/agent-eval/benchmark-cases', async (req, res) => {
+  if (!isRuntimeRecord(req.body) || !normalizedString(req.body.title, 180)) {
+    res.status(400).json({ error: 'Benchmark case title is required.' });
+    return;
+  }
+  const grader = isRuntimeRecord(req.body.grader) ? req.body.grader : {};
+  const input: AgentBenchmarkCaseCreateInput = {
+    title: normalizedString(req.body.title, 180)!,
+    sourceTraceId: normalizedString(req.body.sourceTraceId, 180),
+    usage: req.body.usage === 'update_evidence' ? 'update_evidence' : 'validation',
+    taskType: normalizedString(req.body.taskType, 120),
+    scopeTags: normalizedStringArray(req.body.scopeTags, 100, 120),
+    inputRef: normalizedString(req.body.inputRef, 500),
+    environmentRef: normalizedString(req.body.environmentRef, 500),
+    expectedArtifactRefs: normalizedStringArray(req.body.expectedArtifactRefs, 100, 300),
+    grader: {
+      kind: grader.kind === 'trace_signal' || grader.kind === 'command' || grader.kind === 'artifact' || grader.kind === 'json_schema' ? grader.kind : 'manual',
+      version: normalizedString(grader.version, 120) ?? 'manual-v1',
+      config: isRuntimeRecord(grader.config) ? grader.config : undefined,
+    },
+    critical: req.body.critical === true,
+    riskLevel: req.body.riskLevel === 'L0' || req.body.riskLevel === 'L2' || req.body.riskLevel === 'L3' || req.body.riskLevel === 'L4' ? req.body.riskLevel : 'L1',
+    status: req.body.status === 'draft' || req.body.status === 'archived' ? req.body.status : 'ready',
+    createdBy: normalizedString(req.body.createdBy, 120),
+  };
+  try {
+    res.status(201).json(await store.createAgentBenchmarkCase(input));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post('/api/agent-eval/benchmark-cases/from-trace/:traceId', async (req, res) => {
+  const body = isRuntimeRecord(req.body) ? req.body : {};
+  try {
+    res.status(201).json(await store.createAgentBenchmarkCaseFromTrace(req.params.traceId, {
+      title: normalizedString(body.title, 180) ?? '',
+      usage: body.usage === 'update_evidence' ? 'update_evidence' : 'validation',
+      taskType: normalizedString(body.taskType, 120),
+      scopeTags: normalizedStringArray(body.scopeTags, 100, 120),
+      critical: body.critical === true,
+      createdBy: normalizedString(body.createdBy, 120),
+    }));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/agent-eval/benchmark-suites', (_req, res) => {
+  res.json(store.listAgentBenchmarkSuites());
+});
+
+app.post('/api/agent-eval/benchmark-suites', async (req, res) => {
+  if (!isRuntimeRecord(req.body) || !normalizedString(req.body.name, 180) || !normalizedString(req.body.issueId, 180)) {
+    res.status(400).json({ error: 'Benchmark suite name and issueId are required.' });
+    return;
+  }
+  const input: AgentBenchmarkSuiteCreateInput = {
+    name: normalizedString(req.body.name, 180)!,
+    issueId: normalizedString(req.body.issueId, 180)!,
+    caseIds: normalizedStringArray(req.body.caseIds, 500, 180),
+    version: normalizedString(req.body.version, 120),
+    freeze: req.body.freeze === true,
+    createdBy: normalizedString(req.body.createdBy, 120),
+  };
+  try {
+    res.status(201).json(await store.createAgentBenchmarkSuite(input));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/agent-eval/benchmark-suites/:id', (req, res) => {
+  const suite = store.getAgentBenchmarkSuite(req.params.id);
+  if (!suite) {
+    res.status(404).json({ error: 'Benchmark suite was not found.' });
+    return;
+  }
+  res.json({ suite, cases: suite.caseIds.map((id) => store.getAgentBenchmarkCase(id)).filter(Boolean) });
+});
+
+app.get('/api/agent-eval/experiments', (_req, res) => {
+  res.json(store.listAgentEvaluationExperiments());
+});
+
+app.get('/api/agent-eval/reports', (_req, res) => {
+  res.json(store.listAgentEvaluationReports());
+});
+
+app.post('/api/agent-eval/experiments', async (req, res) => {
+  if (!isRuntimeRecord(req.body) || !isRuntimeRecord(req.body.modelSnapshot)) {
+    res.status(400).json({ error: 'Experiment and model snapshot payloads are required.' });
+    return;
+  }
+  const model = normalizedString(req.body.modelSnapshot.model, 180);
+  const provider = normalizedString(req.body.modelSnapshot.provider, 120);
+  const issueId = normalizedString(req.body.issueId, 180);
+  const benchmarkSuiteId = normalizedString(req.body.benchmarkSuiteId, 180);
+  const baselineHarnessId = normalizedString(req.body.baselineHarnessId, 180);
+  const candidateHarnessId = normalizedString(req.body.candidateHarnessId, 180);
+  if (!model || !provider || !issueId || !benchmarkSuiteId || !baselineHarnessId || !candidateHarnessId) {
+    res.status(400).json({ error: 'Issue, suite, model, provider, baseline, and candidate are required.' });
+    return;
+  }
+  const metrics = Array.isArray(req.body.metrics)
+    ? req.body.metrics.map(normalizeAgentMetric).filter((item): item is AgentEvaluationMetricDefinition => Boolean(item))
+    : undefined;
+  const input: AgentEvaluationExperimentCreateInput = {
+    issueId,
+    benchmarkSuiteId,
+    modelSnapshot: { provider, model, version: normalizedString(req.body.modelSnapshot.version, 120) },
+    baselineHarnessId,
+    candidateHarnessId,
+    runtimeSnapshotHash: normalizedString(req.body.runtimeSnapshotHash, 200),
+    evaluatorVersion: normalizedString(req.body.evaluatorVersion, 120),
+    repetitions: finiteNumber(req.body.repetitions),
+    metrics,
+    createdBy: normalizedString(req.body.createdBy, 120),
+  };
+  try {
+    res.status(201).json(await store.createAgentEvaluationExperiment(input));
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/agent-eval/experiments/:id', (req, res) => {
+  const experiment = store.getAgentEvaluationExperiment(req.params.id);
+  if (!experiment) {
+    res.status(404).json({ error: 'Evaluation experiment was not found.' });
+    return;
+  }
+  res.json({
+    experiment,
+    rollouts: store.listAgentEvaluationRollouts(experiment.id),
+    report: store.getAgentEvaluationReport(experiment.id),
+  });
+});
+
+app.post('/api/agent-eval/experiments/:id/start', async (req, res) => {
+  try {
+    const experiment = await store.startAgentEvaluationExperiment(req.params.id);
+    if (!experiment) {
+      res.status(404).json({ error: 'Evaluation experiment was not found.' });
+      return;
+    }
+    res.json(experiment);
+  } catch (error) {
+    res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post('/api/agent-eval/experiments/:id/rollouts', async (req, res) => {
+  if (!isRuntimeRecord(req.body)) {
+    res.status(400).json({ error: 'Rollout payload is required.' });
+    return;
+  }
+  const arm = req.body.arm === 'baseline' || req.body.arm === 'candidate' ? req.body.arm : undefined;
+  const caseId = normalizedString(req.body.caseId, 180);
+  const status = req.body.status === 'passed' || req.body.status === 'failed' || req.body.status === 'error' ? req.body.status : undefined;
+  if (!arm || !caseId || !status) {
+    res.status(400).json({ error: 'Rollout arm, caseId, and status are required.' });
+    return;
+  }
+  const metrics: NonNullable<AgentEvaluationRolloutCreateInput['metrics']> = Array.isArray(req.body.metrics)
+    ? req.body.metrics.flatMap((value): NonNullable<AgentEvaluationRolloutCreateInput['metrics']> => {
+        if (!isRuntimeRecord(value)) return [];
+        const metricId = normalizedString(value.metricId, 120);
+        const metricValue = finiteNumber(value.value);
+        return metricId && metricValue !== undefined ? [{ metricId, value: metricValue }] : [];
+      })
+    : [];
+  try {
+    res.status(201).json(await store.recordAgentEvaluationRollout(req.params.id, {
+      arm,
+      caseId,
+      repetition: finiteNumber(req.body.repetition),
+      sourceTraceId: normalizedString(req.body.sourceTraceId, 180),
+      status,
+      metrics,
+      evidenceIds: normalizedStringArray(req.body.evidenceIds, 100, 180),
+      note: normalizedString(req.body.note, 2000),
+      createdBy: normalizedString(req.body.createdBy, 120),
+    }));
+  } catch (error) {
+    res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post('/api/agent-eval/experiments/:id/complete', async (req, res) => {
+  try {
+    const report = await store.completeAgentEvaluationExperiment(req.params.id);
+    if (!report) {
+      res.status(404).json({ error: 'Evaluation experiment was not found.' });
+      return;
+    }
+    res.json(report);
+  } catch (error) {
+    res.status(409).json({ error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get('/api/agent-eval/experiments/:id/report', (req, res) => {
+  const report = store.getAgentEvaluationReport(req.params.id);
+  if (!report) {
+    res.status(404).json({ error: 'Evaluation report was not found.' });
+    return;
+  }
+  res.json(report);
 });
 
 app.get('/api/ingest/jobs', (_req, res) => {
@@ -3547,8 +3942,14 @@ app.post('/api/raw-traces/:id/reimport', async (req, res) => {
   res.json(job);
 });
 
+if (process.env.TRACEOPS_SERVE_COLLECTOR === 'true') {
+  app.use(express.static(path.resolve(process.cwd(), 'dist/v0.1.0')));
+}
+
 app.listen(port, () => {
-  process.stdout.write(`TraceOps API running on http://localhost:${port}\n`);
-  scheduleWatch(2_000);
-  scheduleTaskExecutor(4_000);
+  process.stdout.write(`TraceOps ${productMode} running on http://localhost:${port}\n`);
+  if (productMode !== '0.1.0') {
+    scheduleWatch(2_000);
+    scheduleTaskExecutor(4_000);
+  }
 });

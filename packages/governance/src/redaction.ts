@@ -11,6 +11,11 @@ export interface DistilledText {
   distillation: TrainingTextDistillation;
 }
 
+export interface RedactedEvaluationText {
+  clean: string;
+  distillation: TrainingTextDistillation;
+}
+
 const rules: Rule[] = [
   {
     type: 'thinking_marker',
@@ -24,12 +29,17 @@ const rules: Rule[] = [
   },
   {
     type: 'credential',
-    pattern: /\b(?:api[_-]?key|token|password|secret)\s*[:=]\s*['"]?[^'"\s,，;；)]+/gi,
+    pattern: /\b(?:api[_-]?key|token|password|secret)\s*['"]?\s*[:=]\s*['"]?[^'"\s,，;；)]+/gi,
     replacement: '<SECRET_FIELD>',
   },
   {
     type: 'local_path',
-    pattern: /(?:~|\/Users\/[^/\s`'"，。；;,)]*|\/var\/folders|\/private\/var|\/tmp|\/Volumes)\/[^\s`'"，。；;,)]*/g,
+    pattern: /(?:~(?:\/[^\s`'"，。；;,)]*)?|\/Users\/[^/\s`'"，。；;,)]*(?:\/[^\s`'"，。；;,)]*)?|\/home\/[^/\s`'"，。；;,)]*(?:\/[^\s`'"，。；;,)]*)?|\/(?:var\/folders|private\/var|tmp|Volumes)(?:\/[^\s`'"，。；;,)]*)?)/g,
+    replacement: '<LOCAL_PATH>',
+  },
+  {
+    type: 'local_path',
+    pattern: /[A-Za-z]:\\(?:Users\\[^\\\s`'"，。；;,)]+\\)?[^\s`'"，。；;,)]*/g,
     replacement: '<LOCAL_PATH>',
   },
   {
@@ -61,7 +71,7 @@ function recordRedaction(redactions: Map<TrainingTextRedactionType, TrainingText
   });
 }
 
-export function distillTrainingText(value: string | undefined): DistilledText {
+function applyRedactionRules(value: string | undefined, compactWhitespace: boolean): DistilledText {
   let clean = value ?? '';
   const redactions = new Map<TrainingTextRedactionType, TrainingTextRedaction>();
 
@@ -74,7 +84,7 @@ export function distillTrainingText(value: string | undefined): DistilledText {
     if (count > 0) recordRedaction(redactions, rule, count);
   }
 
-  clean = compact(clean);
+  clean = compactWhitespace ? compact(clean) : clean.trim();
   const items = Array.from(redactions.values());
   return {
     clean,
@@ -86,4 +96,16 @@ export function distillTrainingText(value: string | undefined): DistilledText {
       cleanLength: clean.length,
     },
   };
+}
+
+export function distillTrainingText(value: string | undefined): DistilledText {
+  return applyRedactionRules(value, true);
+}
+
+/**
+ * Redacts the same sensitive values as training distillation while preserving
+ * line breaks and indentation required to replay tool inputs and results.
+ */
+export function redactEvaluationText(value: string | undefined): RedactedEvaluationText {
+  return applyRedactionRules(value, false);
 }

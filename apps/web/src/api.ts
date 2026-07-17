@@ -1,4 +1,15 @@
 import type {
+  AgentBenchmarkCase,
+  AgentBenchmarkCaseCreateInput,
+  AgentBenchmarkSuite,
+  AgentBenchmarkSuiteCreateInput,
+  AgentEvaluationComparisonReport,
+  AgentEvaluationExperiment,
+  AgentEvaluationExperimentCreateInput,
+  AgentEvaluationIssue,
+  AgentEvaluationIssueCreateInput,
+  AgentEvaluationRollout,
+  AgentEvaluationRolloutCreateInput,
   CleanTraceListResponse,
   DatasetClosedLoopApprovalDeploymentResult,
   DatasetClosedLoopCandidateCycleResult,
@@ -40,6 +51,9 @@ import type {
   DatasetVersionDiffReviewDecision,
   GovernanceAuditRecord,
   GovernancePolicyResponse,
+  HarnessSnapshot,
+  HarnessSnapshotCreateInput,
+  HarnessSnapshotDiff,
   IngestDiagnosticTriageDecision,
   IngestJob,
   IngestQualityPolicyApplyResult,
@@ -60,6 +74,9 @@ import type {
   StorePersistenceHealth,
   TraceOpsSegmentBackfillResult,
   TraceOpsSegmentStoreStatus,
+  TraceOpsPlatformArchitecture,
+  TraceOpsProductRelease,
+  TraceOpsProductVersion,
   StoreSnapshotCreateResult,
   StoreSnapshotRecord,
   StoreSnapshotRestoreResult,
@@ -104,6 +121,18 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export function getSourceStatus() {
   return request<SourceStatus>('/api/sources/kodax/status');
+}
+
+export function getPlatformArchitecture() {
+  return request<TraceOpsPlatformArchitecture>('/api/platform/architecture');
+}
+
+export function getProductReleases() {
+  return request<{ currentVersion: TraceOpsProductVersion; releases: TraceOpsProductRelease[] }>('/api/platform/releases');
+}
+
+export function getProductRelease(version: TraceOpsProductVersion) {
+  return request<TraceOpsProductRelease>(`/api/platform/releases/${version}`);
 }
 
 export function getGovernancePolicy() {
@@ -166,6 +195,102 @@ export function setKodaXWatch(enabled: boolean) {
     method: 'POST',
     body: JSON.stringify({ enabled }),
   });
+}
+
+export function listHarnessSnapshots() {
+  return request<HarnessSnapshot[]>('/api/harness-snapshots');
+}
+
+export function createHarnessSnapshot(input: HarnessSnapshotCreateInput) {
+  return request<HarnessSnapshot>('/api/harness-snapshots', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function getHarnessSnapshotDiff(id: string, baseId?: string) {
+  const query = baseId ? `?baseId=${encodeURIComponent(baseId)}` : '';
+  return request<HarnessSnapshotDiff>(`/api/harness-snapshots/${encodeURIComponent(id)}/diff${query}`);
+}
+
+export function listAgentEvaluationIssues() {
+  return request<AgentEvaluationIssue[]>('/api/agent-eval/issues');
+}
+
+export function createAgentEvaluationIssue(input: AgentEvaluationIssueCreateInput) {
+  return request<AgentEvaluationIssue>('/api/agent-eval/issues', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function listAgentBenchmarkCases() {
+  return request<AgentBenchmarkCase[]>('/api/agent-eval/benchmark-cases');
+}
+
+export function createAgentBenchmarkCase(input: AgentBenchmarkCaseCreateInput) {
+  return request<AgentBenchmarkCase>('/api/agent-eval/benchmark-cases', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function createAgentBenchmarkCaseFromTrace(traceId: string, input: Partial<AgentBenchmarkCaseCreateInput> = {}) {
+  return request<AgentBenchmarkCase>(`/api/agent-eval/benchmark-cases/from-trace/${encodeURIComponent(traceId)}`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function listAgentBenchmarkSuites() {
+  return request<AgentBenchmarkSuite[]>('/api/agent-eval/benchmark-suites');
+}
+
+export function createAgentBenchmarkSuite(input: AgentBenchmarkSuiteCreateInput) {
+  return request<AgentBenchmarkSuite>('/api/agent-eval/benchmark-suites', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function listAgentEvaluationExperiments() {
+  return request<AgentEvaluationExperiment[]>('/api/agent-eval/experiments');
+}
+
+export function listAgentEvaluationReports() {
+  return request<AgentEvaluationComparisonReport[]>('/api/agent-eval/reports');
+}
+
+export function createAgentEvaluationExperiment(input: AgentEvaluationExperimentCreateInput) {
+  return request<AgentEvaluationExperiment>('/api/agent-eval/experiments', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function startAgentEvaluationExperiment(id: string) {
+  return request<AgentEvaluationExperiment>(`/api/agent-eval/experiments/${encodeURIComponent(id)}/start`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function recordAgentEvaluationRollout(id: string, input: AgentEvaluationRolloutCreateInput) {
+  return request<AgentEvaluationRollout>(`/api/agent-eval/experiments/${encodeURIComponent(id)}/rollouts`, {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export function completeAgentEvaluationExperiment(id: string) {
+  return request<AgentEvaluationComparisonReport>(`/api/agent-eval/experiments/${encodeURIComponent(id)}/complete`, {
+    method: 'POST',
+    body: JSON.stringify({}),
+  });
+}
+
+export function getAgentEvaluationReport(id: string) {
+  return request<AgentEvaluationComparisonReport>(`/api/agent-eval/experiments/${encodeURIComponent(id)}/report`);
 }
 
 export function listJobs() {

@@ -84,6 +84,259 @@ const demoTrace = {
   latestSourceHash: 'demo-source-hash-001',
 };
 
+const demoHarnessBaseline = {
+  id: 'harness-demo-h0',
+  name: 'KodaX production Harness',
+  version: 'h0',
+  status: 'active',
+  source: { repository: 'BizAgentOS/KodaX', commit: 'demo-h0' },
+  components: {
+    promptHash: 'sha256:demo-prompt-h0',
+    contextPolicyHash: 'sha256:demo-context-h0',
+    skillManifestHash: 'sha256:demo-skills-h0',
+  },
+  compatibleModels: ['kodax-agent-demo'],
+  sourceTraceIds: [traceId],
+  contentHash: 'sha256:demo-harness-h0',
+  createdBy: 'kodax-engineer',
+  createdAt: now,
+  updatedAt: now,
+};
+
+const demoHarnessCandidate = {
+  ...demoHarnessBaseline,
+  id: 'harness-demo-h1',
+  name: 'KodaX verification Harness',
+  version: 'h1',
+  parentId: demoHarnessBaseline.id,
+  status: 'candidate',
+  source: { repository: 'BizAgentOS/KodaX', commit: 'demo-h1' },
+  components: {
+    promptHash: 'sha256:demo-prompt-h1',
+    contextPolicyHash: 'sha256:demo-context-h1',
+    skillManifestHash: 'sha256:demo-skills-h1',
+    verifierHash: 'sha256:demo-verifier-h1',
+  },
+  changeSummary: 'Require evidence-backed verification before declaring a code task complete.',
+  contentHash: 'sha256:demo-harness-h1',
+};
+
+const demoAgentIssue = {
+  id: 'agent-eval-issue-demo-001',
+  title: '代码修改后缺少验证证据',
+  description: '真实 Session 显示 Agent 偶尔在没有运行相关测试时声明任务完成。',
+  category: 'verification',
+  scopeTags: ['kodax', 'code-change'],
+  sourceTraceIds: [traceId],
+  primaryMetricId: 'task_success',
+  owner: 'kodax-engineer',
+  status: 'validated',
+  createdAt: now,
+  updatedAt: now,
+};
+
+const demoBenchmarkCase = {
+  id: 'agent-case-demo-001',
+  sourceTraceId: traceId,
+  usage: 'validation',
+  title: '修改 API schema 并提供验证证据',
+  taskType: 'code-change',
+  scopeTags: ['kodax', 'typescript'],
+  inputRef: `clean-trace:${traceId}`,
+  expectedArtifactRefs: ['evidence-demo-002'],
+  grader: { kind: 'trace_signal', version: 'trace-signal-v1' },
+  critical: true,
+  riskLevel: 'L1',
+  status: 'ready',
+  createdBy: 'traceops-demo',
+  createdAt: now,
+  updatedAt: now,
+};
+
+const demoBenchmarkSuite = {
+  id: 'agent-suite-demo-001',
+  name: 'KodaX verification validation v1',
+  purpose: 'update_validation',
+  issueId: demoAgentIssue.id,
+  caseIds: [demoBenchmarkCase.id],
+  version: 'v1',
+  status: 'frozen',
+  snapshotHash: 'sha256:demo-agent-suite',
+  createdBy: 'traceops-demo',
+  createdAt: now,
+  updatedAt: now,
+};
+
+const demoAgentMetrics = [
+  { id: 'task_success', label: 'Task success', unit: 'percent', direction: 'increase', aggregation: 'rate', role: 'primary', targetDelta: 0.05 },
+  { id: 'artifact_verified', label: 'Artifact verified', unit: 'percent', direction: 'increase', aggregation: 'rate', role: 'diagnostic' },
+  { id: 'evidence_complete', label: 'Evidence complete', unit: 'percent', direction: 'increase', aggregation: 'rate', role: 'diagnostic' },
+  { id: 'runtime_error', label: 'Runtime errors', unit: 'count', direction: 'decrease', aggregation: 'sum', role: 'guardrail' },
+  { id: 'token_usage', label: 'Token usage', unit: 'tokens', direction: 'decrease', aggregation: 'mean', role: 'guardrail', maxDelta: 0 },
+];
+
+const demoAgentExperiment = {
+  id: 'agent-experiment-demo-001',
+  issueId: demoAgentIssue.id,
+  benchmarkSuiteId: demoBenchmarkSuite.id,
+  modelSnapshot: { provider: 'demo-provider', model: 'kodax-agent-demo' },
+  baselineHarnessId: demoHarnessBaseline.id,
+  candidateHarnessId: demoHarnessCandidate.id,
+  runtimeSnapshotHash: 'sha256:demo-runtime-fixed',
+  evaluatorVersion: 'traceops-agent-eval-v1',
+  repetitions: 1,
+  metrics: demoAgentMetrics,
+  status: 'completed',
+  experimentHash: 'sha256:demo-agent-experiment',
+  createdBy: 'traceops-demo',
+  createdAt: now,
+  updatedAt: now,
+  startedAt: now,
+  completedAt: now,
+};
+
+const demoAgentReport = {
+  id: 'agent-eval-report-demo-001',
+  experimentId: demoAgentExperiment.id,
+  verdict: 'improved',
+  baselineSummary: [
+    { metricId: 'task_success', value: 0, samples: 1 },
+    { metricId: 'artifact_verified', value: 0, samples: 1 },
+    { metricId: 'evidence_complete', value: 0, samples: 1 },
+    { metricId: 'runtime_error', value: 0, samples: 1 },
+    { metricId: 'token_usage', value: 1050, samples: 1 },
+  ],
+  candidateSummary: [
+    { metricId: 'task_success', value: 1, samples: 1 },
+    { metricId: 'artifact_verified', value: 1, samples: 1 },
+    { metricId: 'evidence_complete', value: 1, samples: 1 },
+    { metricId: 'runtime_error', value: 0, samples: 1 },
+    { metricId: 'token_usage', value: 980, samples: 1 },
+  ],
+  deltas: [
+    { metricId: 'task_success', baseline: 0, candidate: 1, delta: 1, passed: true, reason: 'Primary target met.' },
+    { metricId: 'artifact_verified', baseline: 0, candidate: 1, delta: 1, passed: true, reason: 'Diagnostic improvement.' },
+    { metricId: 'evidence_complete', baseline: 0, candidate: 1, delta: 1, passed: true, reason: 'Diagnostic improvement.' },
+    { metricId: 'runtime_error', baseline: 0, candidate: 0, delta: 0, passed: true, reason: 'Guardrail held.' },
+    { metricId: 'token_usage', baseline: 1050, candidate: 980, delta: -70, passed: true, reason: 'Cost guardrail held.' },
+  ],
+  churn: { passToPass: 0, failToPass: 1, passToFail: 0, failToFail: 0, criticalRegressions: 0 },
+  reasons: ['All primary metrics met their predeclared targets.', '1 validation case moved from fail to pass.'],
+  recommendation: 'Retain the candidate Harness for broader generalization and regression evaluation.',
+  reportHash: 'sha256:demo-agent-evaluation-report',
+  createdAt: now,
+};
+
+const demoProductReleases = [
+  {
+    version: '0.1.0',
+    status: 'current',
+    title: 'Trace Data Foundation',
+    productAreaIds: ['data_access'],
+    scope: '只建设 Session 接入、Trace 还原、Evidence 归因、预处理治理和评测数据集整理。',
+    deliverable: 'Evaluation-ready Trace Dataset',
+    acceptanceCriteria: ['Session 自动接入', 'Raw Trace 与 Evidence 可回放', '数据治理可审计', '评测数据集可版本化'],
+    excludedCapabilities: ['Harness 正式评测', '模型评测', '模型后训练与发布'],
+  },
+  {
+    version: '0.2.0',
+    status: 'next',
+    title: 'Agent & Model Evaluation',
+    productAreaIds: ['data_access', 'evaluation'],
+    scope: '在 0.1.0 数据基础上建设 Agent / Harness Eval、Model Eval、泛化与回归评测。',
+    deliverable: 'Harness Verdict + Model Verdict',
+    acceptanceCriteria: ['Harness H0/H1 对照', 'Model Snapshot 对照', '泛化与回归评测', '可审计 Verdict'],
+    excludedCapabilities: ['真实训练 Provider', '模型发布与线上反馈'],
+    dependsOn: '0.1.0',
+  },
+  {
+    version: '0.3.0',
+    status: 'planned',
+    title: 'Model Post-training Loop',
+    productAreaIds: ['data_access', 'evaluation', 'model_training'],
+    scope: '在数据与评测体系稳定后，建设模型后训练、评测门禁、发布和线上反馈闭环。',
+    deliverable: 'Validated Model Release + Production Feedback',
+    acceptanceCriteria: ['真实训练 Provider', 'Model Snapshot Lineage', '模型评测门禁', 'Canary / Rollback / Feedback'],
+    excludedCapabilities: [],
+    dependsOn: '0.2.0',
+  },
+];
+
+const demoPlatformArchitecture = {
+  version: 'traceops-platform-architecture-v1',
+  currentVersion: '0.1.0',
+  generatedAt: now,
+  releases: demoProductReleases,
+  areas: [
+    {
+      id: 'data_access',
+      order: 1,
+      introducedIn: '0.1.0',
+      releaseStatus: 'current',
+      title: '数据接入与治理',
+      shortTitle: '数据接入',
+      purpose: '把真实 Session 变成可回放、可治理、可直接用于下一阶段评测的数据资产。',
+      status: 'ready',
+      entryArtifact: 'KodaX / Space / AgentOS Session',
+      exitArtifact: 'Evaluation-ready Trace Dataset',
+      modules: [
+        { id: 'session_ingestion', title: 'Session 数据接入', purpose: '连接并持续接收 Session。', status: 'ready', stageId: 'stage-ingest', apiNamespace: '/api/sources', metrics: [{ value: 1, label: 'sessions', tone: 'good' }], responsibilities: ['Connector 与增量同步', '接入质量'] },
+        { id: 'trace_evidence', title: 'Trace 与 Evidence', purpose: '建立真实任务证据链。', status: 'ready', stageId: 'stage-raw', apiNamespace: '/api/raw-traces', metrics: [{ value: 1, label: 'raw traces', tone: 'good' }], responsibilities: ['Raw Trace', 'Evidence 归因'] },
+        { id: 'data_governance', title: 'Trace 预处理与治理', purpose: '清洗、风险与评测用途分类。', status: 'attention', stageId: 'stage-governance', apiNamespace: '/api/training-samples', metrics: [{ value: 2, label: 'candidates', tone: 'good' }, { value: 1, label: 'to govern', tone: 'warn' }], responsibilities: ['脱敏与风险', 'Review / Repair'] },
+        { id: 'dataset_registry', title: '评测数据集版本', purpose: '固化可追踪的评测数据集版本。', status: 'ready', stageId: 'stage-dataset', apiNamespace: '/api/datasets', metrics: [{ value: 1, label: 'versions', tone: 'good' }], responsibilities: ['Dataset Version', 'Diff 与质量门禁'] },
+      ],
+    },
+    {
+      id: 'evaluation',
+      order: 2,
+      introducedIn: '0.2.0',
+      releaseStatus: 'next',
+      title: 'Agent 与模型评测',
+      shortTitle: '评测',
+      purpose: '分别证明 Harness 改动和 Model 改动是否真正提升。',
+      status: 'ready',
+      entryArtifact: 'Evaluation Issue + Benchmark Suite',
+      exitArtifact: 'Agent Verdict + Model Verdict',
+      modules: [
+        { id: 'agent_harness_evaluation', title: 'Agent / Harness 评测', purpose: '固定 Model，对比 Harness H0/H1。', status: 'ready', stageId: 'stage-evaluation', apiNamespace: '/api/agent-eval', metrics: [{ value: 1, label: 'experiments' }, { value: 1, label: 'improved', tone: 'good' }], responsibilities: ['Harness H0/H1', 'Case Churn'] },
+        { id: 'model_evaluation', title: '模型评测', purpose: '固定 Harness，对比 Model Snapshot。', status: 'idle', stageId: 'stage-model-evaluation', apiNamespace: '/api/eval-runs', metrics: [{ value: 0, label: 'model evals' }], responsibilities: ['Model-only Baseline', 'Model × Harness'] },
+      ],
+    },
+    {
+      id: 'model_training',
+      order: 3,
+      introducedIn: '0.3.0',
+      releaseStatus: 'planned',
+      title: '模型后训练与发布',
+      shortTitle: '模型后训练',
+      purpose: '用高价值数据后训练模型，通过评测后发布并回流线上信号。',
+      status: 'idle',
+      entryArtifact: 'Governed Training Dataset',
+      exitArtifact: 'Released Model + Production Feedback',
+      modules: [
+        { id: 'post_training_orchestration', title: '模型后训练', purpose: '启动并跟踪训练。', status: 'idle', stageId: 'stage-training', apiNamespace: '/api/training-runs', metrics: [{ value: 0, label: 'training runs' }], responsibilities: ['Training Handoff', 'Provider Run'] },
+        { id: 'model_release', title: '模型发布', purpose: '评测门禁与部署交接。', status: 'idle', stageId: 'stage-release', apiNamespace: '/api/model-release-gates', metrics: [{ value: 0, label: 'release gates' }], responsibilities: ['Release Gate', 'Deployment'] },
+        { id: 'production_feedback', title: '上线反馈闭环', purpose: '线上信号回流评测与数据。', status: 'idle', stageId: 'stage-feedback', apiNamespace: '/api/feedback-loops', metrics: [{ value: 0, label: 'feedback loops' }], responsibilities: ['Monitor', 'Feedback Loop'] },
+      ],
+    },
+  ],
+  transitions: [
+    { from: 'data_access', to: 'evaluation', artifact: 'Clean Trace / Validation Case', rule: '治理完成后进入评测。' },
+    { from: 'evaluation', to: 'model_training', artifact: 'Validated Dataset Candidate', rule: '验证通过后晋升训练候选。' },
+    { from: 'model_training', to: 'evaluation', artifact: 'Model Snapshot / Production Signal', rule: '训练与上线信号重新进入评测。' },
+  ],
+  evaluationBoundary: {
+    agentEvaluation: '固定 Model 与 Runtime，只改变 Harness；输出 Harness Verdict。',
+    modelEvaluation: '固定 Harness 与 Benchmark，对比 Model Snapshot；输出 Model Verdict。',
+  },
+  sharedFoundation: {
+    title: '平台治理',
+    purpose: '为三个产品域提供统一审计、权限、任务编排、存储和 Lineage。',
+    stageId: 'stage-system',
+    capabilities: ['Governance Audit', 'Task Orchestration', 'Segment Lake', 'Snapshot / Restore', 'Lineage'],
+  },
+};
+
 const events = [
   {
     id: 'evt-001',
@@ -734,6 +987,20 @@ export function shouldUseDemoApi(fallback = false) {
 }
 
 function genericMutationResult(path: string) {
+  if (path.endsWith('/complete') && path.includes('/api/agent-eval/experiments/')) return demoAgentReport;
+  if (path.endsWith('/start') && path.includes('/api/agent-eval/experiments/')) {
+    return { ...demoAgentExperiment, status: 'running', completedAt: undefined };
+  }
+  if (path.includes('/api/agent-eval/experiments/') && path.endsWith('/rollouts')) {
+    return { id: 'agent-rollout-demo-imported', experimentId: demoAgentExperiment.id, createdAt: now };
+  }
+  if (path === '/api/harness-snapshots') return demoHarnessCandidate;
+  if (path === '/api/agent-eval/issues') return demoAgentIssue;
+  if (path === '/api/agent-eval/benchmark-cases' || path.includes('/benchmark-cases/from-trace/')) {
+    return demoBenchmarkCase;
+  }
+  if (path === '/api/agent-eval/benchmark-suites') return demoBenchmarkSuite;
+  if (path === '/api/agent-eval/experiments') return demoAgentExperiment;
   if (path.includes('/sync')) return job;
   if (path.includes('/watch')) return sourceStatus;
   if (path.includes('/segments/backfill') || path.includes('/segments/rebuild')) {
@@ -791,6 +1058,43 @@ export async function demoApiResponse<T>(url: string, init?: RequestInit): Promi
     } as T;
   }
   if (path === '/api/tasks') return taskList as T;
+  if (path === '/api/platform/architecture') return demoPlatformArchitecture as T;
+  if (path === '/api/platform/releases') return { currentVersion: '0.1.0', releases: demoProductReleases } as T;
+  if (path.startsWith('/api/platform/releases/')) {
+    return demoProductReleases.find((release) => release.version === path.split('/')[4]) as T;
+  }
+  if (path.startsWith('/api/platform/areas/') && path.endsWith('/overview')) {
+    const areaId = path.split('/')[4];
+    return { generatedAt: now, area: demoPlatformArchitecture.areas.find((area) => area.id === areaId) } as T;
+  }
+  if (path === '/api/harness-snapshots') return [demoHarnessCandidate, demoHarnessBaseline] as T;
+  if (path.startsWith('/api/harness-snapshots/') && path.endsWith('/diff')) {
+    return {
+      baseline: demoHarnessBaseline,
+      candidate: demoHarnessCandidate,
+      changedComponents: ['promptHash', 'contextPolicyHash', 'skillManifestHash', 'verifierHash'],
+      unchangedComponents: [],
+      changeSummary: demoHarnessCandidate.changeSummary,
+    } as T;
+  }
+  if (path.startsWith('/api/harness-snapshots/')) {
+    return (path.endsWith(demoHarnessBaseline.id) ? demoHarnessBaseline : demoHarnessCandidate) as T;
+  }
+  if (path === '/api/agent-eval/issues') return [demoAgentIssue] as T;
+  if (path.startsWith('/api/agent-eval/issues/')) return demoAgentIssue as T;
+  if (path === '/api/agent-eval/benchmark-cases') return [demoBenchmarkCase] as T;
+  if (path === '/api/agent-eval/benchmark-suites') return [demoBenchmarkSuite] as T;
+  if (path.startsWith('/api/agent-eval/benchmark-suites/')) {
+    return { suite: demoBenchmarkSuite, cases: [demoBenchmarkCase] } as T;
+  }
+  if (path === '/api/agent-eval/experiments') return [demoAgentExperiment] as T;
+  if (path === '/api/agent-eval/reports') return [demoAgentReport] as T;
+  if (path.startsWith('/api/agent-eval/experiments/') && path.endsWith('/report')) {
+    return demoAgentReport as T;
+  }
+  if (path.startsWith('/api/agent-eval/experiments/')) {
+    return { experiment: demoAgentExperiment, rollouts: [], report: demoAgentReport } as T;
+  }
   if (path === '/api/tasks/automation-plan') {
     return {
       generatedAt: now,

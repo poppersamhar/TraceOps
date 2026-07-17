@@ -1,6 +1,6 @@
 {
   "framework": "vite",
   "installCommand": "npm install",
-  "buildCommand": "VITE_TRACEOPS_DEMO=true npm run build",
-  "outputDirectory": "dist"
+  "buildCommand": "VITE_TRACEOPS_DEMO=true npm run build:v0.1",
+  "outputDirectory": "dist/v0.1.0"
 }

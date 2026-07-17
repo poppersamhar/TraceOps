@@ -105,6 +105,372 @@ export interface RawTraceEvent {
   riskLevel?: RiskLevel;
 }
 
+export type HarnessSnapshotStatus = 'draft' | 'candidate' | 'active' | 'archived';
+
+export interface HarnessSnapshotComponents {
+  promptHash?: string;
+  contextPolicyHash?: string;
+  skillManifestHash?: string;
+  memoryPolicyHash?: string;
+  toolRegistryHash?: string;
+  workflowHash?: string;
+  verifierHash?: string;
+  runtimePolicyHash?: string;
+}
+
+export interface HarnessSnapshot {
+  id: string;
+  name: string;
+  version: string;
+  parentId?: string;
+  status: HarnessSnapshotStatus;
+  source: {
+    repository?: string;
+    commit?: string;
+    profileId?: string;
+    profileVersion?: string;
+  };
+  components: HarnessSnapshotComponents;
+  compatibleModels: string[];
+  changeSummary?: string;
+  sourceTraceIds: string[];
+  contentHash: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface HarnessSnapshotCreateInput {
+  name: string;
+  version: string;
+  parentId?: string;
+  status?: HarnessSnapshotStatus;
+  source?: HarnessSnapshot['source'];
+  components?: HarnessSnapshotComponents;
+  compatibleModels?: string[];
+  changeSummary?: string;
+  sourceTraceIds?: string[];
+  createdBy?: string;
+}
+
+export interface HarnessSnapshotDiff {
+  baseId: string;
+  headId: string;
+  changedComponents: Array<{
+    component: keyof HarnessSnapshotComponents;
+    before?: string;
+    after?: string;
+  }>;
+  sourceChanged: boolean;
+  compatibleModelsChanged: boolean;
+}
+
+export type AgentEvaluationIssueCategory =
+  | 'context'
+  | 'skill'
+  | 'memory'
+  | 'tool_use'
+  | 'planning'
+  | 'verification'
+  | 'runtime'
+  | 'other';
+
+export type AgentEvaluationIssueStatus = 'open' | 'evaluating' | 'validated' | 'rejected';
+
+export interface AgentEvaluationIssue {
+  id: string;
+  title: string;
+  description: string;
+  category: AgentEvaluationIssueCategory;
+  scopeTags: string[];
+  sourceTraceIds: string[];
+  primaryMetricId: string;
+  owner: string;
+  status: AgentEvaluationIssueStatus;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentEvaluationIssueCreateInput {
+  title: string;
+  description?: string;
+  category?: AgentEvaluationIssueCategory;
+  scopeTags?: string[];
+  sourceTraceIds?: string[];
+  primaryMetricId?: string;
+  owner?: string;
+}
+
+export type AgentBenchmarkCaseUsage = 'update_evidence' | 'validation';
+export type AgentBenchmarkCaseStatus = 'draft' | 'ready' | 'archived';
+export type AgentEvaluationGraderKind = 'manual' | 'trace_signal' | 'command' | 'artifact' | 'json_schema';
+
+export interface AgentEvaluationGraderSpec {
+  kind: AgentEvaluationGraderKind;
+  version: string;
+  config?: Record<string, unknown>;
+}
+
+export interface AgentBenchmarkCase {
+  id: string;
+  sourceTraceId?: string;
+  usage: AgentBenchmarkCaseUsage;
+  title: string;
+  taskType: string;
+  scopeTags: string[];
+  inputRef: string;
+  environmentRef?: string;
+  expectedArtifactRefs: string[];
+  grader: AgentEvaluationGraderSpec;
+  critical: boolean;
+  riskLevel: RiskLevel;
+  status: AgentBenchmarkCaseStatus;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentBenchmarkCaseCreateInput {
+  sourceTraceId?: string;
+  usage?: AgentBenchmarkCaseUsage;
+  title: string;
+  taskType?: string;
+  scopeTags?: string[];
+  inputRef?: string;
+  environmentRef?: string;
+  expectedArtifactRefs?: string[];
+  grader?: AgentEvaluationGraderSpec;
+  critical?: boolean;
+  riskLevel?: RiskLevel;
+  status?: AgentBenchmarkCaseStatus;
+  createdBy?: string;
+}
+
+export interface AgentBenchmarkSuite {
+  id: string;
+  name: string;
+  purpose: 'update_validation';
+  issueId: string;
+  caseIds: string[];
+  version: string;
+  status: 'draft' | 'frozen' | 'archived';
+  snapshotHash?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentBenchmarkSuiteCreateInput {
+  name: string;
+  issueId: string;
+  caseIds?: string[];
+  version?: string;
+  freeze?: boolean;
+  createdBy?: string;
+}
+
+export type AgentEvaluationMetricDirection = 'increase' | 'decrease';
+export type AgentEvaluationMetricAggregation = 'mean' | 'rate' | 'sum';
+export type AgentEvaluationMetricRole = 'primary' | 'guardrail' | 'diagnostic';
+
+export interface AgentEvaluationMetricDefinition {
+  id: string;
+  label: string;
+  unit: 'score' | 'percent' | 'count' | 'tokens' | 'ms';
+  direction: AgentEvaluationMetricDirection;
+  aggregation: AgentEvaluationMetricAggregation;
+  role: AgentEvaluationMetricRole;
+  targetDelta?: number;
+  maxCandidateValue?: number;
+  maxDelta?: number;
+}
+
+export interface AgentEvaluationMetricValue {
+  metricId: string;
+  value: number;
+}
+
+export type AgentEvaluationExperimentStatus = 'draft' | 'running' | 'completed' | 'failed';
+
+export interface AgentEvaluationExperiment {
+  id: string;
+  issueId: string;
+  benchmarkSuiteId: string;
+  modelSnapshot: {
+    provider: string;
+    model: string;
+    version?: string;
+  };
+  baselineHarnessId: string;
+  candidateHarnessId: string;
+  runtimeSnapshotHash: string;
+  evaluatorVersion: string;
+  repetitions: number;
+  metrics: AgentEvaluationMetricDefinition[];
+  status: AgentEvaluationExperimentStatus;
+  experimentHash: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt?: string;
+  completedAt?: string;
+}
+
+export interface AgentEvaluationExperimentCreateInput {
+  issueId: string;
+  benchmarkSuiteId: string;
+  modelSnapshot: AgentEvaluationExperiment['modelSnapshot'];
+  baselineHarnessId: string;
+  candidateHarnessId: string;
+  runtimeSnapshotHash?: string;
+  evaluatorVersion?: string;
+  repetitions?: number;
+  metrics?: AgentEvaluationMetricDefinition[];
+  createdBy?: string;
+}
+
+export type AgentEvaluationArm = 'baseline' | 'candidate';
+export type AgentEvaluationRolloutStatus = 'passed' | 'failed' | 'error';
+
+export interface AgentEvaluationRollout {
+  id: string;
+  experimentId: string;
+  arm: AgentEvaluationArm;
+  caseId: string;
+  repetition: number;
+  sourceTraceId?: string;
+  status: AgentEvaluationRolloutStatus;
+  metrics: AgentEvaluationMetricValue[];
+  evidenceIds: string[];
+  note?: string;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentEvaluationRolloutCreateInput {
+  arm: AgentEvaluationArm;
+  caseId: string;
+  repetition?: number;
+  sourceTraceId?: string;
+  status: AgentEvaluationRolloutStatus;
+  metrics?: AgentEvaluationMetricValue[];
+  evidenceIds?: string[];
+  note?: string;
+  createdBy?: string;
+}
+
+export interface AgentEvaluationMetricSummary {
+  metricId: string;
+  value: number;
+  samples: number;
+}
+
+export interface AgentEvaluationMetricDelta {
+  metricId: string;
+  baseline: number;
+  candidate: number;
+  delta: number;
+  passed: boolean;
+  reason: string;
+}
+
+export type AgentEvaluationVerdict = 'improved' | 'inconclusive' | 'regressed';
+
+export interface AgentEvaluationComparisonReport {
+  id: string;
+  experimentId: string;
+  verdict: AgentEvaluationVerdict;
+  baselineSummary: AgentEvaluationMetricSummary[];
+  candidateSummary: AgentEvaluationMetricSummary[];
+  deltas: AgentEvaluationMetricDelta[];
+  churn: {
+    passToPass: number;
+    failToPass: number;
+    passToFail: number;
+    failToFail: number;
+    criticalRegressions: number;
+  };
+  reasons: string[];
+  recommendation: string;
+  reportHash: string;
+  createdAt: string;
+}
+
+export type TraceOpsProductAreaId = 'data_access' | 'evaluation' | 'model_training';
+export type TraceOpsCapabilityStatus = 'ready' | 'attention' | 'blocked' | 'idle';
+export type TraceOpsProductVersion = '0.1.0' | '0.2.0' | '0.3.0';
+export type TraceOpsReleaseStatus = 'current' | 'next' | 'planned';
+
+export interface TraceOpsProductRelease {
+  version: TraceOpsProductVersion;
+  status: TraceOpsReleaseStatus;
+  title: string;
+  productAreaIds: TraceOpsProductAreaId[];
+  scope: string;
+  deliverable: string;
+  acceptanceCriteria: string[];
+  excludedCapabilities: string[];
+  dependsOn?: TraceOpsProductVersion;
+}
+
+export interface TraceOpsCapabilityMetric {
+  value: number;
+  label: string;
+  tone?: 'neutral' | 'good' | 'warn' | 'danger';
+}
+
+export interface TraceOpsCapabilityModule {
+  id: string;
+  title: string;
+  purpose: string;
+  status: TraceOpsCapabilityStatus;
+  stageId: string;
+  apiNamespace: string;
+  metrics: TraceOpsCapabilityMetric[];
+  responsibilities: string[];
+}
+
+export interface TraceOpsProductArea {
+  id: TraceOpsProductAreaId;
+  order: number;
+  introducedIn: TraceOpsProductVersion;
+  releaseStatus: TraceOpsReleaseStatus;
+  title: string;
+  shortTitle: string;
+  purpose: string;
+  status: TraceOpsCapabilityStatus;
+  entryArtifact: string;
+  exitArtifact: string;
+  modules: TraceOpsCapabilityModule[];
+}
+
+export interface TraceOpsPlatformTransition {
+  from: TraceOpsProductAreaId;
+  to: TraceOpsProductAreaId;
+  artifact: string;
+  rule: string;
+}
+
+export interface TraceOpsPlatformArchitecture {
+  version: 'traceops-platform-architecture-v1';
+  currentVersion: TraceOpsProductVersion;
+  generatedAt: string;
+  releases: TraceOpsProductRelease[];
+  areas: TraceOpsProductArea[];
+  transitions: TraceOpsPlatformTransition[];
+  evaluationBoundary: {
+    agentEvaluation: string;
+    modelEvaluation: string;
+  };
+  sharedFoundation: {
+    title: string;
+    purpose: string;
+    stageId: string;
+    capabilities: string[];
+  };
+}
+
 export type KodaXRuntimeEventKind =
   | 'session_started'
   | 'session_updated'
