@@ -16,7 +16,7 @@ export default defineConfig({
     },
   },
   build: {
-    outDir: path.resolve(__dirname, 'dist/v0.1.0'),
+    outDir: path.resolve(__dirname, 'dist/v0.1.1'),
     emptyOutDir: true,
   },
 });

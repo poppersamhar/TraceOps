@@ -53,7 +53,7 @@ import type {
   TraceOpsTaskRunResponse,
 } from '../../../packages/trace-core/src/types';
 import { createPlatformArchitectureRouter } from './modules/platformArchitecture';
-import { createSpaceCollectorV01Router } from './modules/spaceCollectorV01';
+import { createSpaceCollectorV01Router, TRACEOPS_COLLECTOR_VERSION } from './modules/spaceCollectorV01';
 import { TraceOpsStore } from './store';
 
 const port = Number(process.env.TRACEOPS_API_PORT ?? 4177);
@@ -1364,7 +1364,7 @@ app.use('/api/platform', createPlatformArchitectureRouter(store));
 
 app.get('/', (_req, res) => {
   if (process.env.TRACEOPS_SERVE_COLLECTOR === 'true') {
-    res.sendFile(path.resolve(process.cwd(), 'dist/v0.1.0/index.html'));
+    res.sendFile(path.resolve(process.cwd(), 'dist/v0.1.1/index.html'));
     return;
   }
   res.type('html').send(`
@@ -3943,11 +3943,12 @@ app.post('/api/raw-traces/:id/reimport', async (req, res) => {
 });
 
 if (process.env.TRACEOPS_SERVE_COLLECTOR === 'true') {
-  app.use(express.static(path.resolve(process.cwd(), 'dist/v0.1.0')));
+  app.use(express.static(path.resolve(process.cwd(), 'dist/v0.1.1')));
 }
 
 app.listen(port, () => {
-  process.stdout.write(`TraceOps ${productMode} running on http://localhost:${port}\n`);
+  const displayVersion = process.env.TRACEOPS_SERVE_COLLECTOR === 'true' ? TRACEOPS_COLLECTOR_VERSION : productMode;
+  process.stdout.write(`TraceOps ${displayVersion} running on http://localhost:${port}\n`);
   if (productMode !== '0.1.0') {
     scheduleWatch(2_000);
     scheduleTaskExecutor(4_000);

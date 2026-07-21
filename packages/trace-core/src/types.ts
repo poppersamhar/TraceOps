@@ -8,6 +8,8 @@ export type IngestionStatus =
 
 export type RiskLevel = 'L0' | 'L1' | 'L2' | 'L3' | 'L4';
 
+export type CredentialRiskLevel = 'none' | 'mention' | 'high_confidence';
+
 export type TraceStatus = 'running' | 'completed' | 'failed' | 'unknown';
 
 export interface RawTraceRuntime {
@@ -46,6 +48,7 @@ export interface RawTraceRisk {
   containsSourceCodeHint: boolean;
   containsLocalPathHint: boolean;
   containsCredentialHint: boolean;
+  credentialRisk: CredentialRiskLevel;
   containsCustomerDataHint: boolean;
   trainableByDefault: false;
 }

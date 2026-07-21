@@ -1,12 +1,12 @@
 # TraceOps
 
-TraceOps v0.1.0 是一个本地运行的 **Space Session 评测数据采集器**。
+TraceOps v0.1.1 是一个本地运行的 **Space Session 评测数据采集器**。
 
 它读取电脑上的 KodaX Space Session，自动完成筛选、脱敏、Trace 还原、Evaluation Case 构建和质量检查，最后生成一个 `.json.gz` 数据包。数据只在本机处理，不会自动上传，也不会修改 Space 的原始文件。
 
 ## 下载
 
-1. 打开 [TraceOps v0.1.0 Release](https://github.com/BizAgentOS/TraceOps/releases/tag/v0.1.0)。
+1. 打开 [TraceOps v0.1.1 Release](https://github.com/BizAgentOS/TraceOps/releases/tag/v0.1.1)。
 2. 在 **Assets** 中下载 `Source code (zip)`。
 3. 解压到本地。
 4. 安装 [Node.js 20+](https://nodejs.org/)（已经安装可以跳过）。
@@ -56,6 +56,7 @@ http://localhost:4177/
 - 保留用户主 Session，排除临时 Session 和内部 worker Session。
 - 保留完整 Trace、工具调用、工具结果、Evidence 和对话分支关系。
 - 移除 Thinking，并脱敏密钥、Token、邮箱、本地路径和原始 Session ID。
+- 区分“配置名或占位符提及”与“高置信真实凭据”：前者保留脱敏 Trace 并进入人工复核，只有后者会阻断详细 Payload。
 - 生成 Evaluation Case、成功判据、Grader、Replay 要求和质量门禁结果。
 - 输出 `eval_ready`、`needs_review`、`privacy_blocked`、`incomplete` 四种状态。
 - 生成供 v0.2.0 使用的 `caseIndex` 和 `qualityReport`。
@@ -74,12 +75,12 @@ http://localhost:4177/
 ```bash
 npm run dev:v0.1
 npm test
-npm run build
+npm run build:v0.1
 ```
 
-v0.1.0 与后续版本独立保留。v0.2.0 将建设 Agent/Harness 评测，v0.3.0 将建设模型后训练。
+v0.1.1 是 v0.1 采集器产品线的当前版本；v0.1.0 Tag 继续保留供回滚。v0.2.0 将建设 Agent/Harness 评测，v0.3.0 将建设模型后训练。
 
-详细说明见 [v0.1.0 使用手册](docs/v0.1.0-space-session-collector.md) 和 [产品路线](docs/product-release-roadmap.md)。
+详细说明见 [v0.1.x 使用手册](docs/v0.1.0-space-session-collector.md) 和 [产品路线](docs/product-release-roadmap.md)。
 
 ## License
 

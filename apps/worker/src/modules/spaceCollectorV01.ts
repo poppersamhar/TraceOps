@@ -25,7 +25,7 @@ import {
   type SpaceEvaluationTrace,
 } from './spaceEvaluationPreprocessor';
 
-export const TRACEOPS_COLLECTOR_VERSION = '0.1.0';
+export const TRACEOPS_COLLECTOR_VERSION = '0.1.1';
 export const TRACEOPS_COLLECTOR_SCHEMA = 'traceops-space-evaluation-package-v1';
 export const TRACEOPS_CASE_INDEX_SCHEMA = 'traceops-space-evaluation-case-index-v1';
 

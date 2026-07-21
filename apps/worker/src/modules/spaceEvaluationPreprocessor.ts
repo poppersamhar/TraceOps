@@ -16,7 +16,7 @@ import type {
 
 export const SPACE_EVALUATION_TRACE_SCHEMA = 'traceops-space-evaluation-trace-v1';
 export const SPACE_EVALUATION_CASE_SCHEMA = 'traceops-space-evaluation-case-v1';
-export const SPACE_EVALUATION_POLICY_VERSION = 'space-eval-preprocess-v1';
+export const SPACE_EVALUATION_POLICY_VERSION = 'space-eval-preprocess-v1.1';
 
 const MAX_STRUCTURED_DEPTH = 10;
 const MAX_ARRAY_ITEMS = 500;
@@ -527,14 +527,18 @@ function buildQualityGate(input: {
       : 'No explicit check_result evidence exists; a human must define the benchmark oracle.',
     { requiresReview: verificationRefs.length === 0, evidenceRefs: verificationRefs },
   ));
+  const credentialRisk = input.trace.risk.credentialRisk
+    ?? (input.trace.risk.containsCredentialHint ? 'high_confidence' : 'none');
   checks.push(qualityCheck(
     'credential_privacy',
     'privacy',
-    input.trace.risk.containsCredentialHint ? 'fail' : 'pass',
-    input.trace.risk.containsCredentialHint
-      ? 'Credential-like source content was detected. Detailed payload is withheld.'
-      : 'No credential-like source content was detected.',
-    { requiresReview: input.trace.risk.containsCredentialHint },
+    credentialRisk === 'high_confidence' ? 'fail' : credentialRisk === 'mention' ? 'warn' : 'pass',
+    credentialRisk === 'high_confidence'
+      ? 'A high-confidence credential pattern was detected. Detailed payload is withheld.'
+      : credentialRisk === 'mention'
+        ? 'A credential field or environment file was mentioned, but no high-confidence secret value was detected.'
+        : 'No credential-like source content was detected.',
+    { requiresReview: credentialRisk !== 'none' },
   ));
   checks.push(qualityCheck(
     'enterprise_content',

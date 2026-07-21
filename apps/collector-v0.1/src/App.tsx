@@ -70,7 +70,7 @@ export function App() {
     <main className="page-shell">
       <header className="topbar">
         <div className="brand"><Database size={18} strokeWidth={2.2} aria-hidden="true" /> TraceOps</div>
-        <div className="version-badge"><span>v0.1.0</span> Space Evaluation Collector</div>
+        <div className="version-badge"><span>v0.1.1</span> Space Evaluation Collector</div>
       </header>
 
       <section className="hero">
@@ -130,7 +130,7 @@ export function App() {
       </section>
 
       <footer>
-        <span>TraceOps v0.1.0 是独立、可保留的采集版本</span>
+        <span>TraceOps v0.1.1 是独立、可保留的采集版本</span>
         <span>v0.2.0 将作为新的评测产品单独建设，不覆盖本版本</span>
       </footer>
     </main>

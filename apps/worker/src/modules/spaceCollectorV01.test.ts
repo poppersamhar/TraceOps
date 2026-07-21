@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { gunzipSync } from 'node:zlib';
 
+import { scanTextRisk } from '../../../../packages/governance/src/risk';
 import {
   collectSpaceSessions,
   getCollectorPayloadForTesting,
@@ -74,6 +75,26 @@ const verificationEvidence = [{
   },
 }];
 
+test('v0.1 credential risk distinguishes configuration mentions from high-confidence secrets', () => {
+  const environmentMention = scanTextRisk('Update .env.example and document token=<placeholder>.');
+  assert.equal(environmentMention.credentialRisk, 'mention');
+  assert.equal(environmentMention.containsCredentialHint, false);
+  assert.equal(environmentMention.level, 'L2');
+
+  const exampleAssignment = scanTextRisk('api_key = example');
+  assert.equal(exampleAssignment.credentialRisk, 'mention');
+  assert.equal(exampleAssignment.containsCredentialHint, false);
+
+  const highConfidence = scanTextRisk('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.realistic-token-material-123456');
+  assert.equal(highConfidence.credentialRisk, 'high_confidence');
+  assert.equal(highConfidence.containsCredentialHint, true);
+  assert.equal(highConfidence.level, 'L4');
+
+  const harmless = scanTextRisk('The token budget is 4096 and no credentials are configured.');
+  assert.equal(harmless.credentialRisk, 'none');
+  assert.equal(harmless.containsCredentialHint, false);
+});
+
 test('v0.1 collector produces complete Space evaluation traces, cases, and quality gates', async () => {
   resetCollectorRunsForTesting();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'traceops-collector-'));
@@ -85,7 +106,7 @@ test('v0.1 collector produces complete Space evaluation traces, cases, and quali
     await writeSession(sessionsDir, 'privacy-session', { tag: 'partner', scope: 'user' }, [
       {
         role: 'user',
-        content: 'Read /Users/alice/customer-project/report.md with api_key=super-secret-value and reply to owner@example.com',
+        content: 'Read /Users/alice/customer-project/report.md with api_key=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890 and reply to owner@example.com',
       },
       {
         role: 'assistant',
@@ -96,6 +117,10 @@ test('v0.1 collector produces complete Space evaluation traces, cases, and quali
         ],
       },
     ]);
+    await writeSession(sessionsDir, 'credential-mention-session', { tag: 'code', scope: 'user' }, [
+      { role: 'user', content: 'Document the .env.example schema and show token=<placeholder>.' },
+      { role: 'assistant', content: 'Documented the configuration schema without adding a real secret.' },
+    ]);
     await writeSession(sessionsDir, 'ephemeral-session', { tag: 'quick-ask', scope: 'user' }, [
       { role: 'user', content: 'temporary' },
     ]);
@@ -104,41 +129,41 @@ test('v0.1 collector produces complete Space evaluation traces, cases, and quali
     ]);
 
     const before = await getCollectorStatus(sessionsDir);
-    assert.equal(before.source.detectedSessions, 5);
-    assert.equal(before.source.eligibleSessions, 3);
+    assert.equal(before.source.detectedSessions, 6);
+    assert.equal(before.source.eligibleSessions, 4);
     assert.equal(before.source.excludedSessions, 2);
 
     const run = await collectSpaceSessions(sessionsDir);
-    assert.equal(run.processedSessions, 3);
-    assert.equal(run.evaluationCases, 3);
+    assert.equal(run.processedSessions, 4);
+    assert.equal(run.evaluationCases, 4);
     assert.equal(run.evalReady, 1);
-    assert.equal(run.needsReview, 1);
+    assert.equal(run.needsReview, 2);
     assert.equal(run.privacyBlocked, 1);
     assert.equal(run.incomplete, 0);
     assert.equal(run.duplicateCases, 1);
     assert.ok(run.redactions >= 4);
     assert.ok(run.structuredFieldsRedacted >= 1);
     assert.equal(run.thinkingBlocksRemoved, 1);
-    assert.match(run.filename, /^traceops-space-evaluation-\d{8}-\d{6}-3\.json\.gz$/);
+    assert.match(run.filename, /^traceops-space-evaluation-\d{8}-\d{6}-4\.json\.gz$/);
 
     const payload = getCollectorPayloadForTesting(run.id);
     assert.ok(payload);
     const data = JSON.parse(gunzipSync(payload).toString('utf8')) as CollectorPackage;
     assert.equal(data.manifest.schema, 'traceops-space-evaluation-package-v1');
-    assert.equal(data.manifest.collectorVersion, '0.1.0');
+    assert.equal(data.manifest.collectorVersion, '0.1.1');
     assert.equal(data.manifest.compatibility.intendedConsumer, 'TraceOps v0.2.0 Agent Evaluation');
     assert.equal(data.manifest.compatibility.caseIndexSchema, 'traceops-space-evaluation-case-index-v1');
     assert.equal(data.manifest.benchmarkPolicy.defaultUsage, 'update_evidence');
     assert.deepEqual(data.qualityReport.decisions, {
       eval_ready: 1,
-      needs_review: 1,
+      needs_review: 2,
       privacy_blocked: 1,
       incomplete: 0,
     });
-    assert.equal(data.qualityReport.humanReviewRequired, 2);
-    assert.equal(data.caseIndex.length, 3);
-    assert.equal(data.evaluationTraces.length, 3);
-    assert.equal(data.evaluationCases.length, 3);
+    assert.equal(data.qualityReport.humanReviewRequired, 3);
+    assert.equal(data.caseIndex.length, 4);
+    assert.equal(data.evaluationTraces.length, 4);
+    assert.equal(data.evaluationCases.length, 4);
     assert.equal(
       data.manifest.contentChecksum,
       createHash('sha256').update(JSON.stringify({
@@ -187,8 +212,16 @@ test('v0.1 collector produces complete Space evaluation traces, cases, and quali
     assert.equal(blockedIndex?.exportPayload, 'metadata_only');
     assert.equal(blockedIndex?.humanReviewRequired, true);
 
+    const mentionCase = data.evaluationCases.find((item) => item.qualityGate.checks.some((check) => check.id === 'credential_privacy' && check.status === 'warn'));
+    assert.ok(mentionCase);
+    assert.equal(mentionCase.qualityGate.decision, 'needs_review');
+    const mentionTrace = data.evaluationTraces.find((item) => item.traceKey === mentionCase.sourceTraceKey);
+    assert.ok(mentionTrace);
+    assert.equal(mentionTrace.exportPayload, 'full_sanitized_trace');
+    assert.ok(mentionTrace.conversation.length > 0);
+
     const serialized = JSON.stringify(data);
-    assert.doesNotMatch(serialized, /super-secret-value/);
+    assert.doesNotMatch(serialized, /sk-proj-abcdefghijklmnopqrstuvwxyz1234567890/);
     assert.doesNotMatch(serialized, /nested-secret-value/);
     assert.doesNotMatch(serialized, /owner@example\.com/);
     assert.doesNotMatch(serialized, /\/Users\/alice/);
