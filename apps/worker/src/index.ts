@@ -1364,7 +1364,7 @@ app.use('/api/platform', createPlatformArchitectureRouter(store));
 
 app.get('/', (_req, res) => {
   if (process.env.TRACEOPS_SERVE_COLLECTOR === 'true') {
-    res.sendFile(path.resolve(process.cwd(), 'dist/v0.1.1/index.html'));
+    res.sendFile(path.resolve(process.cwd(), 'dist/v0.1.2/index.html'));
     return;
   }
   res.type('html').send(`
@@ -3943,7 +3943,7 @@ app.post('/api/raw-traces/:id/reimport', async (req, res) => {
 });
 
 if (process.env.TRACEOPS_SERVE_COLLECTOR === 'true') {
-  app.use(express.static(path.resolve(process.cwd(), 'dist/v0.1.1')));
+  app.use(express.static(path.resolve(process.cwd(), 'dist/v0.1.2')));
 }
 
 app.listen(port, () => {

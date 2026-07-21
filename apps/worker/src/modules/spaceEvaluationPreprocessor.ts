@@ -16,12 +16,13 @@ import type {
 
 export const SPACE_EVALUATION_TRACE_SCHEMA = 'traceops-space-evaluation-trace-v1';
 export const SPACE_EVALUATION_CASE_SCHEMA = 'traceops-space-evaluation-case-v1';
-export const SPACE_EVALUATION_POLICY_VERSION = 'space-eval-preprocess-v1.1';
+export const SPACE_EVALUATION_POLICY_VERSION = 'space-workflow-redaction-v1';
+export const SPACE_WORKFLOW_SESSION_SCHEMA = 'traceops-space-workflow-session-v1';
 
-const MAX_STRUCTURED_DEPTH = 10;
-const MAX_ARRAY_ITEMS = 500;
-const MAX_OBJECT_FIELDS = 300;
-const MAX_TEXT_LENGTH = 100_000;
+const MAX_STRUCTURED_DEPTH = 40;
+const MAX_ARRAY_ITEMS = 100_000;
+const MAX_OBJECT_FIELDS = 10_000;
+const MAX_TEXT_LENGTH = 2_000_000;
 const SENSITIVE_KEY = /(?:^|_)(?:api_?key|access_?token|refresh_?token|auth_?token|password|passwd|secret|authorization|cookie|credentials?|private_?key)(?:$|_)/i;
 const THINKING_KEY = /^(?:thinking|thinking_signature|chain_of_thought|reasoning_content)$/i;
 const IDENTIFIER_KEY = /(?:^|_)(?:id|.*_id|.*Id)$/;
@@ -87,7 +88,6 @@ export interface SanitizedTraceEvent {
   summary: string;
   riskLevel?: RiskLevel;
   payload?: SanitizedJson;
-  payloadOmitted?: 'privacy_blocked';
 }
 
 export interface SanitizedEvidence {
@@ -113,6 +113,15 @@ export interface SpaceEvaluationTrace {
   createdAt?: string;
   taskStatus: RawTrace['status'];
   runtime: SafeRuntimeSnapshot;
+  sessionTopology: {
+    role: 'main' | 'worker';
+    linkStatus: 'root' | 'linked' | 'inferred' | 'orphan' | 'ambiguous';
+    linkMethod: 'root' | 'session_reference' | 'single_main_same_project' | 'none';
+    parentTraceKey?: string;
+    childTraceKeys: string[];
+    candidateParentTraceKeys: string[];
+    requiresReview: boolean;
+  };
   lineage: {
     version: 1;
     activeEntryKey?: string;
@@ -124,6 +133,15 @@ export interface SpaceEvaluationTrace {
       active: boolean;
     }>;
   };
+  transcript: Array<{
+    entryKey: string;
+    parentEntryKey?: string;
+    occurredAt: string;
+    type: 'message' | 'compaction' | 'branch_summary';
+    role?: 'user' | 'assistant' | 'system';
+    active: boolean;
+    content: SanitizedJson;
+  }>;
   counts: {
     messages: number;
     events: number;
@@ -145,6 +163,21 @@ export interface SpaceEvaluationTrace {
   }>;
   events: SanitizedTraceEvent[];
   evidence: SanitizedEvidence[];
+  workflow: {
+    skills: string[];
+    tools: string[];
+    planningEventRefs: string[];
+    toolCallEventRefs: string[];
+    toolResultEventRefs: string[];
+    errorEventRefs: string[];
+    phases: Array<'conversation' | 'planning' | 'tool_execution' | 'verification' | 'completion'>;
+  };
+  privacy: {
+    handling: 'field_level_masking';
+    contentPreserved: true;
+    sensitiveValuesMasked: number;
+    privateReasoningBlocksOmitted: number;
+  };
   preprocessing: {
     policyVersion: typeof SPACE_EVALUATION_POLICY_VERSION;
     cleaningPolicyVersion: 'kodax-clean-text-v1';
@@ -171,7 +204,7 @@ export interface SpaceEvaluationTrace {
     };
   };
   qualityGate: EvaluationQualityGate;
-  exportPayload: 'full_sanitized_trace' | 'metadata_only';
+  exportPayload: 'full_sanitized_trace';
 }
 
 export interface SpaceEvaluationCase {
@@ -231,6 +264,39 @@ export interface SpaceEvaluationCase {
 export interface SpaceEvaluationPreprocessResult {
   trace: SpaceEvaluationTrace;
   evaluationCase: SpaceEvaluationCase;
+  redactions: EvaluationRedactionStats;
+}
+
+export interface SpaceWorkflowSession {
+  schema: typeof SPACE_WORKFLOW_SESSION_SCHEMA;
+  sessionKey: string;
+  revisionKey: string;
+  projectGroupKey: string;
+  sourceFingerprint: string;
+  title: string;
+  tag?: string;
+  createdAt?: string;
+  taskStatus: RawTrace['status'];
+  runtime: SafeRuntimeSnapshot;
+  topology: SpaceEvaluationTrace['sessionTopology'];
+  transcript: SpaceEvaluationTrace['transcript'];
+  conversation: SpaceEvaluationTrace['conversation'];
+  events: SanitizedTraceEvent[];
+  evidence: SanitizedEvidence[];
+  workflow: SpaceEvaluationTrace['workflow'];
+  overview: {
+    task: string;
+    outcome: string;
+  };
+  counts: SpaceEvaluationTrace['counts'];
+  risk: RawTrace['risk'];
+  privacy: SpaceEvaluationTrace['privacy'] & {
+    redactions: EvaluationRedactionStats;
+  };
+}
+
+export interface SpaceWorkflowPreprocessResult {
+  session: SpaceWorkflowSession;
   redactions: EvaluationRedactionStats;
 }
 
@@ -315,7 +381,7 @@ function sanitizeStructured(
     if (SENSITIVE_KEY.test(key)) {
       stats.structuredFieldsRedacted += 1;
       recordManualRedaction(stats, 'credential_field');
-      return '<SECRET_FIELD>';
+      return '***';
     }
     if (IDENTIFIER_KEY.test(key)) {
       stats.pseudonymizedIdentifiers += 1;
@@ -335,7 +401,7 @@ function sanitizeStructured(
   if (!input) return cleanPreservingStructure(String(value), stats);
   if (input.type === 'thinking') {
     stats.thinkingBlocksRemoved += 1;
-    return undefined;
+    return { type: 'thinking', content: '<PRIVATE_REASONING_OMITTED>' };
   }
   const entries = Object.entries(input).slice(0, MAX_OBJECT_FIELDS);
   if (Object.keys(input).length > entries.length) stats.truncatedValues += 1;
@@ -343,12 +409,13 @@ function sanitizeStructured(
   for (const [field, fieldValue] of entries) {
     if (THINKING_KEY.test(field)) {
       stats.thinkingBlocksRemoved += 1;
+      output[field] = '<PRIVATE_REASONING_OMITTED>';
       continue;
     }
     if (SENSITIVE_KEY.test(field)) {
       stats.structuredFieldsRedacted += 1;
       recordManualRedaction(stats, 'credential_field');
-      output[field] = '<SECRET_FIELD>';
+      output[field] = '***';
       continue;
     }
     const sanitized = sanitizeStructured(fieldValue, stats, { depth: depth + 1, key: field });
@@ -443,6 +510,159 @@ function sanitizeEvidence(traceKey: string, evidence: RawEvidence[], stats: Eval
   }));
 }
 
+function eventToolName(event: SanitizedTraceEvent): string | undefined {
+  const match = event.label.match(/^Tool (?:call|card):\s*(.+)$/i);
+  return match?.[1]?.trim() || undefined;
+}
+
+function extractSkillNames(events: SanitizedTraceEvent[], rawEvents: RawTraceEvent[] = []): string[] {
+  const names = new Set<string>();
+  const pathPattern = /(?:^|[\\/])skills[\\/]([^"'\\/\s]+)[\\/]SKILL\.md/gi;
+  const uriPattern = /skill:\/\/([^"'\s?#]+)/gi;
+  const texts = [
+    ...events.map((event) => `${event.label}\n${event.summary}\n${JSON.stringify(event.payload ?? '')}`),
+    ...rawEvents.map((event) => `${event.label}\n${event.preview}\n${JSON.stringify(event.payload ?? '')}`),
+  ];
+  for (const text of texts) {
+    for (const match of text.matchAll(pathPattern)) {
+      if (match[1]) names.add(match[1]);
+    }
+    for (const match of text.matchAll(uriPattern)) {
+      if (match[1]) names.add(match[1].split('/').filter(Boolean).at(-1) ?? match[1]);
+    }
+  }
+  for (const event of events) {
+    const toolName = eventToolName(event);
+    if (toolName && /(?:^|[.:_-])skill(?:s)?(?:$|[.:_-])/i.test(toolName)) names.add(toolName);
+  }
+  return Array.from(names).sort();
+}
+
+function buildWorkflow(
+  events: SanitizedTraceEvent[],
+  evidence: SanitizedEvidence[],
+  outcome: string,
+  rawEvents: RawTraceEvent[] = [],
+): SpaceEvaluationTrace['workflow'] {
+  const tools = Array.from(new Set(events.map(eventToolName).filter((name): name is string => Boolean(name)))).sort();
+  const planningEventRefs = events
+    .filter((event) => /(?:update[_ -]?plan|task[_ -]?list|todo|planning)/i.test(`${event.label}\n${event.summary}`))
+    .map((event) => event.eventKey);
+  const toolCallEventRefs = events
+    .filter((event) => event.type === 'tool_call' || event.type === 'tool_use')
+    .map((event) => event.eventKey);
+  const toolResultEventRefs = events.filter((event) => event.type === 'tool_result').map((event) => event.eventKey);
+  const errorEventRefs = events
+    .filter((event) => event.type === 'error_metadata' || /(?:error|failed|failure|exception)/i.test(`${event.label}\n${event.summary}`))
+    .map((event) => event.eventKey);
+  const phases: SpaceEvaluationTrace['workflow']['phases'] = ['conversation'];
+  if (planningEventRefs.length > 0) phases.push('planning');
+  if (toolCallEventRefs.length > 0) phases.push('tool_execution');
+  if (evidence.some((item) => item.kind === 'check_result')) phases.push('verification');
+  if (outcome) phases.push('completion');
+  return {
+    skills: extractSkillNames(events, rawEvents),
+    tools,
+    planningEventRefs,
+    toolCallEventRefs,
+    toolResultEventRefs,
+    errorEventRefs,
+    phases,
+  };
+}
+
+export function preprocessSpaceWorkflowSession(
+  summary: KodaXSessionSummary,
+  full: KodaXFullSession,
+): SpaceWorkflowPreprocessResult {
+  const stats = emptyEvaluationRedactionStats();
+  const bundle = normalizeKodaXSession(summary, full);
+  const sessionKey = `space_session_${hash({ id: full.id, projectKey: full.projectKey })}`;
+  const revisionKey = `space_revision_${hash({ sessionKey, sourceHash: bundle.revision.sourceHash })}`;
+  const projectGroupKey = `space_scope_${hash(summary.projectKey ?? full.projectKey ?? full.gitRoot ?? 'unknown')}`;
+  const events = sanitizeEvents(sessionKey, bundle.events, stats);
+  const evidence = sanitizeEvidence(sessionKey, bundle.evidence, stats);
+  const runtime = safeRuntime(full, bundle.trace, stats);
+  const transcript: SpaceWorkflowSession['transcript'] = full.transcriptEntries.map((entry) => ({
+    entryKey: entryKey(sessionKey, entry.entryId),
+    parentEntryKey: entry.parentId ? entryKey(sessionKey, entry.parentId) : undefined,
+    occurredAt: entry.timestamp,
+    type: entry.type,
+    role: entry.message.role === 'user' || entry.message.role === 'assistant' || entry.message.role === 'system'
+      ? entry.message.role
+      : undefined,
+    active: entry.active,
+    content: sanitizeStructured(entry.message, stats) ?? {},
+  }));
+  const conversation: SpaceWorkflowSession['conversation'] = full.transcriptEntries
+    .filter((entry) => entry.active && entry.type === 'message')
+    .map((entry) => {
+      const role = entry.message.role;
+      if (role !== 'user' && role !== 'assistant' && role !== 'system') return undefined;
+      const content = messageText(entry.message, stats);
+      return content ? {
+        entryKey: entryKey(sessionKey, entry.entryId),
+        role,
+        occurredAt: entry.timestamp,
+        content,
+      } : undefined;
+    })
+    .filter((item): item is SpaceWorkflowSession['conversation'][number] => Boolean(item));
+  const task = conversation.find((item) => item.role === 'user')?.content ?? '';
+  const outcome = [...conversation].reverse().find((item) => item.role === 'assistant')?.content ?? '';
+  const workflow = buildWorkflow(events, evidence, outcome, bundle.events);
+  const title = cleanCompact(full.title, stats) || 'Untitled session';
+  const session: SpaceWorkflowSession = {
+    schema: SPACE_WORKFLOW_SESSION_SCHEMA,
+    sessionKey,
+    revisionKey,
+    projectGroupKey,
+    sourceFingerprint: hash(bundle.revision.sourceHash, 32),
+    title,
+    tag: full.tag ? cleanCompact(full.tag, stats) : undefined,
+    createdAt: full.createdAt,
+    taskStatus: bundle.trace.status,
+    runtime,
+    topology: {
+      role: summary.scope === 'managed-task-worker' ? 'worker' : 'main',
+      linkStatus: summary.scope === 'managed-task-worker' ? 'orphan' : 'root',
+      linkMethod: summary.scope === 'managed-task-worker' ? 'none' : 'root',
+      childTraceKeys: [],
+      candidateParentTraceKeys: [],
+      requiresReview: false,
+    },
+    transcript,
+    conversation,
+    events,
+    evidence,
+    workflow,
+    overview: { task, outcome },
+    counts: {
+      messages: conversation.length,
+      events: events.length,
+      activeEvents: events.filter((event) => event.active).length,
+      toolUseEvents: bundle.trace.counts.toolUseEvents,
+      toolResultEvents: bundle.trace.counts.toolResultEvents,
+      evidence: evidence.length,
+      verificationEvidence: evidence.filter((item) => item.kind === 'check_result').length,
+      compactions: bundle.trace.counts.compactions,
+      branchSummaries: bundle.trace.counts.branchSummaries,
+      malformedRecords: full.malformedCount,
+    },
+    risk: sanitizeRisk(bundle.trace, stats),
+    privacy: {
+      handling: 'field_level_masking',
+      contentPreserved: true,
+      sensitiveValuesMasked: 0,
+      privateReasoningBlocksOmitted: 0,
+      redactions: stats,
+    },
+  };
+  session.privacy.sensitiveValuesMasked = stats.total;
+  session.privacy.privateReasoningBlocksOmitted = stats.thinkingBlocksRemoved;
+  return { session, redactions: stats };
+}
+
 function qualityCheck(
   id: string,
   dimension: EvaluationQualityCheck['dimension'],
@@ -532,9 +752,9 @@ function buildQualityGate(input: {
   checks.push(qualityCheck(
     'credential_privacy',
     'privacy',
-    credentialRisk === 'high_confidence' ? 'fail' : credentialRisk === 'mention' ? 'warn' : 'pass',
+    credentialRisk === 'none' ? 'pass' : 'warn',
     credentialRisk === 'high_confidence'
-      ? 'A high-confidence credential pattern was detected. Detailed payload is withheld.'
+      ? 'A high-confidence credential pattern was detected and masked in place; the rest of the Session is preserved.'
       : credentialRisk === 'mention'
         ? 'A credential field or environment file was mentioned, but no high-confidence secret value was detected.'
         : 'No credential-like source content was detected.',
@@ -684,6 +904,17 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
       } : undefined;
     })
     .filter((item): item is SpaceEvaluationTrace['conversation'][number] => Boolean(item));
+  const transcript: SpaceEvaluationTrace['transcript'] = full.transcriptEntries.map((entry) => ({
+    entryKey: entryKey(traceKey, entry.entryId),
+    parentEntryKey: entry.parentId ? entryKey(traceKey, entry.parentId) : undefined,
+    occurredAt: entry.timestamp,
+    type: entry.type,
+    role: entry.message.role === 'user' || entry.message.role === 'assistant' || entry.message.role === 'system'
+      ? entry.message.role as 'user' | 'assistant' | 'system'
+      : undefined,
+    active: entry.active,
+    content: sanitizeStructured(entry.message, stats) ?? {},
+  }));
   const capturedTask = conversation.find((item) => item.role === 'user')?.content ?? '';
   const capturedOutcome = [...conversation].reverse().find((item) => item.role === 'assistant')?.content ?? '';
   const task = capturedTask.replace(/\[(?:tool_use|tool_result)[^\]]*\]/gi, '').trim() ? capturedTask : '';
@@ -721,12 +952,9 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
     redactions: stats,
     fingerprint,
   });
-  const metadataOnly = qualityGate.decision === 'privacy_blocked';
-  const safeTask = metadataOnly ? '<WITHHELD_FOR_PRIVACY_REVIEW>' : task;
-  const safeOutcome = metadataOnly ? '<WITHHELD_FOR_PRIVACY_REVIEW>' : outcome;
-  const safeEvents = metadataOnly
-    ? events.map(({ payload: _payload, ...event }) => ({ ...event, payloadOmitted: 'privacy_blocked' as const }))
-    : events;
+  const safeTask = task;
+  const safeOutcome = outcome;
+  const safeEvents = events;
   const verificationEvidence = evidence.filter((item) => item.kind === 'check_result');
   const artifactEvidence = evidence.filter((item) => item.kind === 'file_created' || item.kind === 'file_modified' || item.kind === 'check_result');
   const assertions = buildAssertions(evidence, safeOutcome);
@@ -747,10 +975,18 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
     revisionKey,
     projectGroupKey,
     sourceFingerprint: hash(bundle.revision.sourceHash, 32),
-    title: metadataOnly ? '<WITHHELD_FOR_PRIVACY_REVIEW>' : cleanCompact(full.title, stats) || 'Untitled session',
+    title: cleanCompact(full.title, stats) || 'Untitled session',
     createdAt: full.createdAt,
     taskStatus: bundle.trace.status,
     runtime,
+    sessionTopology: {
+      role: 'main',
+      linkStatus: 'root',
+      linkMethod: 'root',
+      childTraceKeys: [],
+      candidateParentTraceKeys: [],
+      requiresReview: false,
+    },
     lineage: {
       version: 1,
       activeEntryKey: full.lineage?.activeEntryId ? entryKey(traceKey, full.lineage.activeEntryId) : undefined,
@@ -762,6 +998,7 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
         active: entry.active,
       })),
     },
+    transcript,
     counts: {
       messages: conversation.length,
       events: events.length,
@@ -775,16 +1012,23 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
       malformedRecords: full.malformedCount,
     },
     risk: sanitizeRisk(bundle.trace, stats),
-    conversation: metadataOnly ? [] : conversation,
+    conversation,
     events: safeEvents,
     evidence,
+    workflow: buildWorkflow(safeEvents, evidence, safeOutcome),
+    privacy: {
+      handling: 'field_level_masking',
+      contentPreserved: true,
+      sensitiveValuesMasked: stats.total,
+      privateReasoningBlocksOmitted: stats.thinkingBlocksRemoved,
+    },
     preprocessing: {
       policyVersion: SPACE_EVALUATION_POLICY_VERSION,
       cleaningPolicyVersion: 'kodax-clean-text-v1',
       redactions: stats,
       cleanSummary: {
-        task: metadataOnly ? '<WITHHELD_FOR_PRIVACY_REVIEW>' : cleanCompact(cleanTrace.summary.userGoal, stats),
-        outcome: metadataOnly ? '<WITHHELD_FOR_PRIVACY_REVIEW>' : cleanCompact(cleanTrace.summary.assistantOutcome, stats),
+        task: cleanCompact(cleanTrace.summary.userGoal, stats),
+        outcome: cleanCompact(cleanTrace.summary.assistantOutcome, stats),
         execution: cleanCompact(cleanTrace.summary.execution, stats),
         evidence: cleanCompact(cleanTrace.summary.evidence, stats),
         governance: cleanCompact(cleanTrace.summary.governance, stats),
@@ -813,7 +1057,7 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
       },
     },
     qualityGate,
-    exportPayload: metadataOnly ? 'metadata_only' : 'full_sanitized_trace',
+    exportPayload: 'full_sanitized_trace',
   };
 
   const evidenceRefs = evidence.map((item) => item.evidenceKey);
@@ -830,7 +1074,7 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
     capabilityTags,
     input: {
       task: safeTask,
-      systemContext: metadataOnly ? [] : conversation.filter((item) => item.role === 'system').map((item) => item.content),
+      systemContext: conversation.filter((item) => item.role === 'system').map((item) => item.content),
       runtime,
       requiredTools: tools,
       traceRef: traceKey,
@@ -842,8 +1086,8 @@ export function preprocessSpaceSession(summary: KodaXSessionSummary, full: KodaX
       assertions,
     },
     grader: {
-      kind: verificationEvidence.length > 0 && !metadataOnly ? 'trace_signal' : 'manual',
-      version: verificationEvidence.length > 0 && !metadataOnly ? 'space-trace-grader-v1' : 'manual-rubric-v1',
+      kind: verificationEvidence.length > 0 ? 'trace_signal' : 'manual',
+      version: verificationEvidence.length > 0 ? 'space-trace-grader-v1' : 'manual-rubric-v1',
       config: {
         successCriteria: [
           safeOutcome ? 'The final outcome satisfies the captured task intent.' : 'A reviewer defines the expected outcome.',

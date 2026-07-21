@@ -16,23 +16,22 @@ TraceOps 用语义版本号管理正式产品边界：
 - `GET /api/platform/releases`
 - `GET /api/platform/releases/:version`
 
-## v0.1.0 — Space Evaluation Collector
+## v0.1.x — Space Workflow Collector
 
-状态：当前正式版本。
+状态：当前正式产品线；最新版本为 v0.1.2。
 
-目标：让数据提供同事在本机一键把 Space Session 整理成能够被 v0.2.0 评测体系消费的数据包。
+目标：让数据提供同事在本机一键导出完整、可复盘、已局部脱敏的 Space Session Workflow，为后续分析和评测建模提供可信材料。
 
 正式范围：
 
 - 自动检测 Space 与 KodaX SDK 共用的本地 Session 目录。
-- 一键收集用户主 Session，排除 managed worker 和临时 Session。
-- 保留成功与失败任务、完整事件图、分支、工具输入/结果、Evidence 与安全运行元信息。
-- 删除 thinking，对结构化字段逐项脱敏并匿名化所有关联 ID。
-- 生成 Evaluation Trace、Evaluation Case、Assertions、Grader 和 Replay 要求。
-- 生成 `caseIndex` 与 `qualityReport`，作为 v0.2.0 Review 队列和导入验收的轻量入口。
-- 执行完整性、隐私、Evidence、回放、运行归因、污染与去重质量门禁。
+- 一键收集所有可解析的用户、临时、空和 managed worker Session，不按评测价值提前筛除。
+- 保留成功与失败任务、完整 Transcript、有效与历史分支、Skill、计划信号、工具输入/结果、Evidence、错误与运行元信息。
+- 对敏感值执行字段级 `***` 遮罩或安全占位，匿名化关联 ID；不因隐私信号删除整个 Session。
+- 保留 Worker 拓扑；`linked`、`inferred`、`ambiguous` 和 `orphan` 都是描述性信息，不构成数据门禁。
+- 生成 `sessionIndex` 与 `workflowReport`，方便检索和复盘 Workflow。
 - 生成单个 `.json.gz` 数据包并由同事手动下载、发送。
-- 默认作为 `update_evidence`；Validation 必须在 Harness 修改前冻结独立 Holdout。
+- 将 Evaluation Case、Expected Outcome、Grader、去重、Holdout 和 Benchmark 准入统一延后到后续评测阶段。
 
 明确排除：
 
@@ -46,11 +45,11 @@ TraceOps 用语义版本号管理正式产品边界：
 
 1. 同事只需进入一个页面并点击一个主按钮即可完成收集与整理。
 2. 采集器能识别 Space 默认与独立数据档，并且不读取浏览器 Cookie 或修改源文件。
-3. 输出不包含原始工程路径、原始 Session ID、thinking 和已识别的敏感字段，同时保留评测需要的工具与 Evidence 结构。
-4. 数据包有版本、Manifest、Trace、Case、Grader、质量结论和内容校验值，可被 v0.2.0 直接导入。
+3. 输出不包含原始工程路径、原始 Session ID、私密 reasoning 内容和已识别的敏感值，同时保留这些内容所在的结构与 Workflow 上下文。
+4. 数据包有版本、Manifest、Session Index、Workflow Report、完整脱敏 Session 和内容校验值。
 5. v0.1.0 入口、启动命令和构建产物在开发 v0.2.0 时继续保留。
 
-核心交付物：`Evaluation-ready Space Trace Package`。
+核心交付物：`Sanitized Full-fidelity Space Workflow Package`。
 
 ## v0.2.0 — Agent & Model Evaluation
 

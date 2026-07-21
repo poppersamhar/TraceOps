@@ -232,11 +232,11 @@ const demoProductReleases = [
   {
     version: '0.1.0',
     status: 'current',
-    title: 'Trace Data Foundation',
+    title: 'Space Workflow Collector',
     productAreaIds: ['data_access'],
-    scope: '只建设 Session 接入、Trace 还原、Evidence 归因、预处理治理和评测数据集整理。',
-    deliverable: 'Evaluation-ready Trace Dataset',
-    acceptanceCriteria: ['Session 自动接入', 'Raw Trace 与 Evidence 可回放', '数据治理可审计', '评测数据集可版本化'],
+    scope: '只建设完整 Session 接入、字段级隐私遮罩、Workflow 还原、Skill/工具索引和本地导出。',
+    deliverable: 'Sanitized Full-fidelity Space Workflow Package',
+    acceptanceCriteria: ['Session 自动接入', 'Transcript 与分支完整保留', '敏感值局部遮罩', 'Worker 与 Skill/工具轨迹可复盘'],
     excludedCapabilities: ['Harness 正式评测', '模型评测', '模型后训练与发布'],
   },
   {

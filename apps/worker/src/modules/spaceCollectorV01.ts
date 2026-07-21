@@ -5,35 +5,32 @@ import path from 'node:path';
 
 import { Router, type Response } from 'express';
 
+import { redactEvaluationText } from '../../../../packages/governance/src/redaction';
 import {
   listKodaXSessions,
   loadKodaXFullSession,
   resolveKodaXSessionsDir,
   sessionsDirExists,
+  type KodaXFullSession,
   type KodaXSessionSummary,
 } from '../../../../packages/kodax-connector/src/kodaxScanner';
 import {
-  applyPackageDeduplication,
   emptyEvaluationRedactionStats,
   mergeEvaluationRedactionStats,
-  preprocessSpaceSession,
-  SPACE_EVALUATION_CASE_SCHEMA,
+  preprocessSpaceWorkflowSession,
   SPACE_EVALUATION_POLICY_VERSION,
-  SPACE_EVALUATION_TRACE_SCHEMA,
-  type EvaluationReadiness,
-  type SpaceEvaluationCase,
-  type SpaceEvaluationTrace,
+  SPACE_WORKFLOW_SESSION_SCHEMA,
+  type SpaceWorkflowSession,
 } from './spaceEvaluationPreprocessor';
 
-export const TRACEOPS_COLLECTOR_VERSION = '0.1.1';
-export const TRACEOPS_COLLECTOR_SCHEMA = 'traceops-space-evaluation-package-v1';
-export const TRACEOPS_CASE_INDEX_SCHEMA = 'traceops-space-evaluation-case-index-v1';
+export const TRACEOPS_COLLECTOR_VERSION = '0.1.2';
+export const TRACEOPS_COLLECTOR_SCHEMA = 'traceops-space-workflow-package-v1';
+export const TRACEOPS_SESSION_INDEX_SCHEMA = 'traceops-space-workflow-index-v1';
 
-const DEFAULT_SESSION_LIMIT = 2_000;
-const EPHEMERAL_TAGS = new Set(['space-ephemeral', 'quick-ask']);
+const DEFAULT_SESSION_LIMIT = Number.POSITIVE_INFINITY;
 
 export interface CollectorStatus {
-  product: 'TraceOps Space Evaluation Collector';
+  product: 'TraceOps Space Workflow Collector';
   version: typeof TRACEOPS_COLLECTOR_VERSION;
   source: {
     name: 'KodaX Space';
@@ -46,7 +43,7 @@ export interface CollectorStatus {
   privacy: {
     automaticUpload: false;
     rawFilesModified: false;
-    output: 'evaluation_json_gzip';
+    output: 'workflow_json_gzip';
   };
   lastRun?: CollectorRunSummary;
 }
@@ -59,13 +56,15 @@ export interface CollectorRunSummary {
   downloadUrl: string;
   sourceSessions: number;
   processedSessions: number;
-  evaluationCases: number;
-  evaluationCandidates: number;
-  evalReady: number;
-  needsReview: number;
-  privacyBlocked: number;
-  incomplete: number;
-  duplicateCases: number;
+  mainSessions: number;
+  workerSessions: number;
+  linkedWorkerSessions: number;
+  workerSessionsNeedingReview: number;
+  conversationEntries: number;
+  toolCalls: number;
+  toolResults: number;
+  skillUsages: number;
+  sessionsWithMaskedData: number;
   failedSessions: number;
   excludedSessions: number;
   redactions: number;
@@ -73,6 +72,16 @@ export interface CollectorRunSummary {
   structuredFieldsRedacted: number;
   compressedBytes: number;
   checksum: string;
+}
+
+export interface WorkflowSessionListItem {
+  sessionKey: string;
+  title: string;
+  tag?: string;
+  scope: 'main' | 'worker';
+  createdAt?: string;
+  messageCount: number;
+  projectGroupKey: string;
 }
 
 export interface CollectorPackage {
@@ -83,22 +92,22 @@ export interface CollectorPackage {
     packageId: string;
     contentChecksum: string;
     compatibility: {
-      intendedConsumer: 'TraceOps v0.2.0 Agent Evaluation';
-      traceSchema: typeof SPACE_EVALUATION_TRACE_SCHEMA;
-      caseSchema: typeof SPACE_EVALUATION_CASE_SCHEMA;
-      caseIndexSchema: typeof TRACEOPS_CASE_INDEX_SCHEMA;
-      preprocessingPolicy: typeof SPACE_EVALUATION_POLICY_VERSION;
+      intendedConsumers: ['TraceOps Workflow Analysis', 'TraceOps v0.2.0 Evaluation Review'];
+      sessionSchema: typeof SPACE_WORKFLOW_SESSION_SCHEMA;
+      sessionIndexSchema: typeof TRACEOPS_SESSION_INDEX_SCHEMA;
+      redactionPolicy: typeof SPACE_EVALUATION_POLICY_VERSION;
     };
     source: {
       product: 'KodaX Space';
       storage: 'shared_kodax_session_store';
-      scope: 'user_sessions_only';
+      scope: 'user_and_managed_worker_sessions';
     };
-    benchmarkPolicy: {
-      defaultUsage: 'update_evidence';
-      validationRequiresIndependentHoldout: true;
-      freezeValidationBeforeHarnessChange: true;
-      failedTasksRemainEligibleForIssueDiscovery: true;
+    collectionPolicy: {
+      preserveAllReadableSessions: true;
+      preserveMainAndWorkerSessions: true;
+      privacyHandling: 'field_level_masking';
+      sessionsDroppedForPrivacy: false;
+      evaluationDecisionsDeferred: true;
     };
     counts: {
       discovered: number;
@@ -106,50 +115,70 @@ export interface CollectorPackage {
       processed: number;
       failed: number;
       excluded: number;
-      evaluationCases: number;
-      evalReady: number;
-      needsReview: number;
-      privacyBlocked: number;
-      incomplete: number;
-      duplicateCases: number;
+      conversationEntries: number;
+      transcriptEntries: number;
+      toolCalls: number;
+      toolResults: number;
+      skillUsages: number;
+      sessionsWithMaskedData: number;
       redactions: number;
       thinkingBlocksRemoved: number;
       structuredFieldsRedacted: number;
       pseudonymizedIdentifiers: number;
       truncatedValues: number;
       malformedRecords: number;
+      mainSessions: number;
+      workerSessions: number;
+      linkedWorkerSessions: number;
+      inferredWorkerSessions: number;
+      orphanWorkerSessions: number;
+      ambiguousWorkerSessions: number;
+      workerSessionsNeedingReview: number;
     };
     exclusions: Record<string, number>;
     processing: string[];
     notice: string;
   };
-  qualityReport: {
-    decisions: Record<EvaluationReadiness, number>;
-    humanReviewRequired: number;
-    automaticGraders: number;
-    replayModes: Record<SpaceEvaluationCase['replay']['mode'], number>;
-    failedChecks: Record<string, number>;
-    warningChecks: Record<string, number>;
+  workflowReport: {
+    sessions: number;
+    mainSessions: number;
+    workerSessions: number;
+    conversationEntries: number;
+    transcriptEntries: number;
+    toolCalls: number;
+    toolResults: number;
+    skillUsages: number;
+    sessionsWithMaskedData: number;
+    privateReasoningBlocksOmitted: number;
+    workers: {
+      total: number;
+      linked: number;
+      inferred: number;
+      orphan: number;
+      ambiguous: number;
+      needsReview: number;
+    };
   };
-  caseIndex: Array<{
-    schema: typeof TRACEOPS_CASE_INDEX_SCHEMA;
-    caseKey: string;
-    sourceTraceKey: string;
-    taskType: SpaceEvaluationCase['taskType'];
-    difficulty: SpaceEvaluationCase['difficulty'];
-    capabilityTags: string[];
-    decision: EvaluationReadiness;
-    qualityScore: number;
-    humanReviewRequired: boolean;
-    failedCheckIds: string[];
-    warningCheckIds: string[];
-    graderKind: SpaceEvaluationCase['grader']['kind'];
-    replayMode: SpaceEvaluationCase['replay']['mode'];
-    validationEligible: boolean;
-    exportPayload: SpaceEvaluationTrace['exportPayload'];
+  sessionIndex: Array<{
+    schema: typeof TRACEOPS_SESSION_INDEX_SCHEMA;
+    sessionKey: string;
+    scope: 'main' | 'worker';
+    title: string;
+    createdAt?: string;
+    taskStatus: SpaceWorkflowSession['taskStatus'];
+    linkStatus: SpaceWorkflowSession['topology']['linkStatus'];
+    parentSessionKey?: string;
+    childSessionKeys: string[];
+    conversationEntries: number;
+    transcriptEntries: number;
+    toolCalls: number;
+    toolResults: number;
+    skills: string[];
+    tools: string[];
+    hasErrors: boolean;
+    sensitiveValuesMasked: number;
   }>;
-  evaluationTraces: SpaceEvaluationTrace[];
-  evaluationCases: SpaceEvaluationCase[];
+  sessions: SpaceWorkflowSession[];
 }
 
 type CollectorRun = CollectorRunSummary & {
@@ -162,6 +191,18 @@ let collectionInFlight = false;
 
 function hash(value: unknown, length = 24): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, length);
+}
+
+function sessionKey(summary: KodaXSessionSummary): string {
+  return `space_session_${hash({ id: summary.id, projectKey: summary.projectKey })}`;
+}
+
+function projectGroupKey(summary: KodaXSessionSummary): string {
+  return `space_scope_${hash(summary.projectKey ?? summary.gitRoot ?? 'unknown')}`;
+}
+
+function safePreviewText(value: string | undefined): string {
+  return redactEvaluationText(value).clean;
 }
 
 function safeSourcePath(sessionsDir: string): string {
@@ -177,62 +218,212 @@ function collectorLimit(): number {
 }
 
 function isEligible(summary: KodaXSessionSummary): boolean {
-  return summary.scope !== 'managed-task-worker' && !EPHEMERAL_TAGS.has(summary.tag ?? '');
+  return Boolean(summary.filePath);
 }
 
-function decisionCounts(cases: SpaceEvaluationCase[]): Record<EvaluationReadiness, number> {
-  return cases.reduce<Record<EvaluationReadiness, number>>((counts, item) => {
-    counts[item.qualityGate.decision] += 1;
-    return counts;
-  }, { eval_ready: 0, needs_review: 0, privacy_blocked: 0, incomplete: 0 });
+export async function listSpaceWorkflowSessions(
+  sessionsDir = resolveKodaXSessionsDir(),
+): Promise<WorkflowSessionListItem[]> {
+  if (!await sessionsDirExists(sessionsDir)) return [];
+  const summaries = await listKodaXSessions(sessionsDir);
+  return summaries.filter(isEligible).map((summary) => ({
+    sessionKey: sessionKey(summary),
+    title: safePreviewText(summary.title) || 'Untitled session',
+    tag: summary.tag ? safePreviewText(summary.tag) : undefined,
+    scope: summary.scope === 'managed-task-worker' ? 'worker' : 'main',
+    createdAt: summary.createdAt,
+    messageCount: summary.msgCount,
+    projectGroupKey: projectGroupKey(summary),
+  }));
 }
 
-function increment(counts: Record<string, number>, key: string) {
-  counts[key] = (counts[key] ?? 0) + 1;
+export async function getSpaceWorkflowSession(
+  requestedSessionKey: string,
+  sessionsDir = resolveKodaXSessionsDir(),
+): Promise<SpaceWorkflowSession | undefined> {
+  if (!await sessionsDirExists(sessionsDir)) return undefined;
+  const summaries = await listKodaXSessions(sessionsDir);
+  const summary = summaries.find((item) => sessionKey(item) === requestedSessionKey);
+  if (!summary) return undefined;
+  const full = await loadKodaXFullSession(summary, sessionsDir);
+  if (!full) return undefined;
+  return preprocessSpaceWorkflowSession(summary, full).session;
 }
 
-function buildQualityReport(cases: SpaceEvaluationCase[]): CollectorPackage['qualityReport'] {
-  const replayModes: CollectorPackage['qualityReport']['replayModes'] = { automatic: 0, assisted: 0, manual: 0 };
-  const failedChecks: Record<string, number> = {};
-  const warningChecks: Record<string, number> = {};
-  for (const evaluationCase of cases) {
-    replayModes[evaluationCase.replay.mode] += 1;
-    for (const check of evaluationCase.qualityGate.checks) {
-      if (check.status === 'fail') increment(failedChecks, check.id);
-      if (check.status === 'warn') increment(warningChecks, check.id);
+interface ProcessedSession {
+  summary: KodaXSessionSummary;
+  full: KodaXFullSession;
+  session: SpaceWorkflowSession;
+}
+
+type WorkerTopologyCounts = CollectorPackage['workflowReport']['workers'];
+
+const SESSION_REFERENCE_TOKEN = /[A-Za-z0-9][A-Za-z0-9_-]{5,}/g;
+
+function collectKnownSessionReferences(
+  value: unknown,
+  knownSessionIds: Set<string>,
+  output: Set<string>,
+  depth = 0,
+  seen = new Set<object>(),
+): void {
+  if (depth > 12 || value === null || value === undefined) return;
+  if (typeof value === 'string') {
+    if (knownSessionIds.has(value)) output.add(value);
+    for (const token of value.match(SESSION_REFERENCE_TOKEN) ?? []) {
+      if (knownSessionIds.has(token)) output.add(token);
+    }
+    return;
+  }
+  if (typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  if (Array.isArray(value)) {
+    for (const item of value) collectKnownSessionReferences(item, knownSessionIds, output, depth + 1, seen);
+    return;
+  }
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (key === 'filePath') continue;
+    collectKnownSessionReferences(item, knownSessionIds, output, depth + 1, seen);
+  }
+}
+
+function sessionReferenceSource(full: KodaXFullSession): unknown[] {
+  return [
+    full.runtimeInfo,
+    full.messages,
+    full.uiHistory,
+    full.lineage,
+    full.artifactLedger,
+    full.errorMetadata,
+    full.extensionRecords,
+  ];
+}
+
+function sameProject(left: ProcessedSession, right: ProcessedSession): boolean {
+  if (left.summary.projectKey && right.summary.projectKey) return left.summary.projectKey === right.summary.projectKey;
+  if (left.full.projectKey && right.full.projectKey) return left.full.projectKey === right.full.projectKey;
+  return Boolean(left.full.gitRoot && right.full.gitRoot && left.full.gitRoot === right.full.gitRoot);
+}
+
+function applyWorkerTopology(
+  mainSessions: ProcessedSession[],
+  workerSessions: ProcessedSession[],
+): WorkerTopologyCounts {
+  const mainIds = new Set(mainSessions.map((item) => item.summary.id));
+  const workerIds = new Set(workerSessions.map((item) => item.summary.id));
+  const mainById = new Map(mainSessions.map((item) => [item.summary.id, item]));
+  const referencedWorkersByMain = new Map<string, Set<string>>();
+
+  for (const main of mainSessions) {
+    const references = new Set<string>();
+    collectKnownSessionReferences(sessionReferenceSource(main.full), workerIds, references);
+    for (const workerId of references) {
+      const parents = referencedWorkersByMain.get(workerId) ?? new Set<string>();
+      parents.add(main.summary.id);
+      referencedWorkersByMain.set(workerId, parents);
     }
   }
+
+  const counts: WorkerTopologyCounts = {
+    total: workerSessions.length,
+    linked: 0,
+    inferred: 0,
+    orphan: 0,
+    ambiguous: 0,
+    needsReview: 0,
+  };
+
+  for (const worker of workerSessions) {
+    const explicitParentIds = new Set(referencedWorkersByMain.get(worker.summary.id) ?? []);
+    collectKnownSessionReferences(sessionReferenceSource(worker.full), mainIds, explicitParentIds);
+    const explicitParents = Array.from(explicitParentIds)
+      .map((id) => mainById.get(id))
+      .filter((item): item is ProcessedSession => Boolean(item));
+    const sameProjectParents = mainSessions.filter((main) => sameProject(worker, main));
+    const candidates = explicitParents.length > 0 ? explicitParents : sameProjectParents;
+    const candidateParentTraceKeys = candidates.map((item) => item.session.sessionKey);
+
+    let linkStatus: SpaceWorkflowSession['topology']['linkStatus'];
+    let linkMethod: SpaceWorkflowSession['topology']['linkMethod'];
+    let parent: ProcessedSession | undefined;
+    if (explicitParents.length === 1) {
+      linkStatus = 'linked';
+      linkMethod = 'session_reference';
+      parent = explicitParents[0];
+    } else if (explicitParents.length > 1) {
+      linkStatus = 'ambiguous';
+      linkMethod = 'session_reference';
+    } else if (sameProjectParents.length === 1) {
+      linkStatus = 'inferred';
+      linkMethod = 'single_main_same_project';
+      parent = sameProjectParents[0];
+    } else if (sameProjectParents.length > 1) {
+      linkStatus = 'ambiguous';
+      linkMethod = 'none';
+    } else {
+      linkStatus = 'orphan';
+      linkMethod = 'none';
+    }
+
+    const requiresReview = linkStatus !== 'linked';
+    worker.session.topology = {
+      role: 'worker',
+      linkStatus,
+      linkMethod,
+      parentTraceKey: parent?.session.sessionKey,
+      childTraceKeys: [],
+      candidateParentTraceKeys,
+      requiresReview,
+    };
+    counts[linkStatus] += 1;
+
+    if (parent) {
+      parent.session.topology.childTraceKeys.push(worker.session.sessionKey);
+    }
+    if (requiresReview) {
+      counts.needsReview += 1;
+    }
+  }
+
+  return counts;
+}
+
+function buildWorkflowReport(sessions: SpaceWorkflowSession[], workers: WorkerTopologyCounts): CollectorPackage['workflowReport'] {
   return {
-    decisions: decisionCounts(cases),
-    humanReviewRequired: cases.filter((item) => item.qualityGate.humanReviewRequired).length,
-    automaticGraders: cases.filter((item) => item.grader.kind === 'trace_signal').length,
-    replayModes,
-    failedChecks,
-    warningChecks,
+    sessions: sessions.length,
+    mainSessions: sessions.filter((item) => item.topology.role === 'main').length,
+    workerSessions: workers.total,
+    conversationEntries: sessions.reduce((sum, item) => sum + item.conversation.length, 0),
+    transcriptEntries: sessions.reduce((sum, item) => sum + item.transcript.length, 0),
+    toolCalls: sessions.reduce((sum, item) => sum + item.workflow.toolCallEventRefs.length, 0),
+    toolResults: sessions.reduce((sum, item) => sum + item.workflow.toolResultEventRefs.length, 0),
+    skillUsages: sessions.reduce((sum, item) => sum + item.workflow.skills.length, 0),
+    sessionsWithMaskedData: sessions.filter((item) => item.privacy.sensitiveValuesMasked > 0).length,
+    privateReasoningBlocksOmitted: sessions.reduce((sum, item) => sum + item.privacy.privateReasoningBlocksOmitted, 0),
+    workers,
   };
 }
 
-function buildCaseIndex(
-  traces: SpaceEvaluationTrace[],
-  cases: SpaceEvaluationCase[],
-): CollectorPackage['caseIndex'] {
-  const payloadByTraceKey = new Map(traces.map((trace) => [trace.traceKey, trace.exportPayload]));
-  return cases.map((evaluationCase) => ({
-    schema: TRACEOPS_CASE_INDEX_SCHEMA,
-    caseKey: evaluationCase.caseKey,
-    sourceTraceKey: evaluationCase.sourceTraceKey,
-    taskType: evaluationCase.taskType,
-    difficulty: evaluationCase.difficulty,
-    capabilityTags: evaluationCase.capabilityTags,
-    decision: evaluationCase.qualityGate.decision,
-    qualityScore: evaluationCase.qualityGate.score,
-    humanReviewRequired: evaluationCase.qualityGate.humanReviewRequired,
-    failedCheckIds: evaluationCase.qualityGate.checks.filter((check) => check.status === 'fail').map((check) => check.id),
-    warningCheckIds: evaluationCase.qualityGate.checks.filter((check) => check.status === 'warn').map((check) => check.id),
-    graderKind: evaluationCase.grader.kind,
-    replayMode: evaluationCase.replay.mode,
-    validationEligible: evaluationCase.benchmarkPromotion.validationEligible,
-    exportPayload: payloadByTraceKey.get(evaluationCase.sourceTraceKey) ?? 'metadata_only',
+function buildSessionIndex(sessions: SpaceWorkflowSession[]): CollectorPackage['sessionIndex'] {
+  return sessions.map((session) => ({
+    schema: TRACEOPS_SESSION_INDEX_SCHEMA,
+    sessionKey: session.sessionKey,
+    scope: session.topology.role,
+    title: session.title,
+    createdAt: session.createdAt,
+    taskStatus: session.taskStatus,
+    linkStatus: session.topology.linkStatus,
+    parentSessionKey: session.topology.parentTraceKey,
+    childSessionKeys: session.topology.childTraceKeys,
+    conversationEntries: session.conversation.length,
+    transcriptEntries: session.transcript.length,
+    toolCalls: session.workflow.toolCallEventRefs.length,
+    toolResults: session.workflow.toolResultEventRefs.length,
+    skills: session.workflow.skills,
+    tools: session.workflow.tools,
+    hasErrors: session.workflow.errorEventRefs.length > 0 || session.taskStatus === 'failed',
+    sensitiveValuesMasked: session.privacy.sensitiveValuesMasked,
   }));
 }
 
@@ -242,7 +433,7 @@ export async function getCollectorStatus(sessionsDir = resolveKodaXSessionsDir()
   const eligible = summaries.filter(isEligible);
   const lastRun = latestRunId ? runs.get(latestRunId) : undefined;
   return {
-    product: 'TraceOps Space Evaluation Collector',
+    product: 'TraceOps Space Workflow Collector',
     version: TRACEOPS_COLLECTOR_VERSION,
     source: {
       name: 'KodaX Space',
@@ -255,7 +446,7 @@ export async function getCollectorStatus(sessionsDir = resolveKodaXSessionsDir()
     privacy: {
       automaticUpload: false,
       rawFilesModified: false,
-      output: 'evaluation_json_gzip',
+      output: 'workflow_json_gzip',
     },
     lastRun: lastRun ? withoutPayload(lastRun) : undefined,
   };
@@ -276,15 +467,12 @@ export async function collectSpaceSessions(sessionsDir = resolveKodaXSessionsDir
   const eligible = discovered.filter(isEligible);
   const selected = eligible.slice(0, collectorLimit());
   const exclusions: Record<string, number> = {
-    managedWorker: discovered.filter((item) => item.scope === 'managed-task-worker').length,
-    ephemeral: discovered.filter((item) => EPHEMERAL_TAGS.has(item.tag ?? '')).length,
     overLimit: Math.max(0, eligible.length - selected.length),
     unreadable: 0,
-    emptyConversation: 0,
   };
   const redactions = emptyEvaluationRedactionStats();
-  const evaluationTraces: SpaceEvaluationTrace[] = [];
-  const evaluationCases: SpaceEvaluationCase[] = [];
+  const processedMainSessions: ProcessedSession[] = [];
+  const processedWorkerSessions: ProcessedSession[] = [];
   let failedSessions = 0;
   let malformedRecords = 0;
 
@@ -296,14 +484,18 @@ export async function collectSpaceSessions(sessionsDir = resolveKodaXSessionsDir
         exclusions.unreadable += 1;
         continue;
       }
-      const result = preprocessSpaceSession(summary, full);
+      const result = preprocessSpaceWorkflowSession(summary, full);
       malformedRecords += full.malformedCount;
-      if (result.trace.counts.messages === 0) {
-        exclusions.emptyConversation += 1;
-        continue;
+      const processed: ProcessedSession = {
+        summary,
+        full,
+        session: result.session,
+      };
+      if (summary.scope === 'managed-task-worker') {
+        processedWorkerSessions.push(processed);
+      } else {
+        processedMainSessions.push(processed);
       }
-      evaluationTraces.push(result.trace);
-      evaluationCases.push(result.evaluationCase);
       mergeEvaluationRedactionStats(redactions, result.redactions);
     } catch {
       failedSessions += 1;
@@ -311,13 +503,16 @@ export async function collectSpaceSessions(sessionsDir = resolveKodaXSessionsDir
     }
   }
 
-  const duplicateCases = applyPackageDeduplication(evaluationTraces, evaluationCases);
-  const decisions = decisionCounts(evaluationCases);
-  const qualityReport = buildQualityReport(evaluationCases);
-  const caseIndex = buildCaseIndex(evaluationTraces, evaluationCases);
-  const packageId = `collector_${generatedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}_${hash({ generatedAt, traces: evaluationTraces.map((item) => item.traceKey) }, 8)}`;
+  const workers = applyWorkerTopology(processedMainSessions, processedWorkerSessions);
+  const sessions = [
+    ...processedMainSessions.map((item) => item.session),
+    ...processedWorkerSessions.map((item) => item.session),
+  ];
+  const workflowReport = buildWorkflowReport(sessions, workers);
+  const sessionIndex = buildSessionIndex(sessions);
+  const packageId = `collector_${generatedAt.replace(/[-:.TZ]/g, '').slice(0, 14)}_${hash({ generatedAt, sessions: sessions.map((item) => item.sessionKey) }, 8)}`;
   const contentChecksum = createHash('sha256')
-    .update(JSON.stringify({ qualityReport, caseIndex, evaluationTraces, evaluationCases }))
+    .update(JSON.stringify({ workflowReport, sessionIndex, sessions }))
     .digest('hex');
   const excludedSessions = Object.values(exclusions).reduce((sum, value) => sum + value, 0);
   const dataPackage: CollectorPackage = {
@@ -328,63 +523,68 @@ export async function collectSpaceSessions(sessionsDir = resolveKodaXSessionsDir
       packageId,
       contentChecksum,
       compatibility: {
-        intendedConsumer: 'TraceOps v0.2.0 Agent Evaluation',
-        traceSchema: SPACE_EVALUATION_TRACE_SCHEMA,
-        caseSchema: SPACE_EVALUATION_CASE_SCHEMA,
-        caseIndexSchema: TRACEOPS_CASE_INDEX_SCHEMA,
-        preprocessingPolicy: SPACE_EVALUATION_POLICY_VERSION,
+        intendedConsumers: ['TraceOps Workflow Analysis', 'TraceOps v0.2.0 Evaluation Review'],
+        sessionSchema: SPACE_WORKFLOW_SESSION_SCHEMA,
+        sessionIndexSchema: TRACEOPS_SESSION_INDEX_SCHEMA,
+        redactionPolicy: SPACE_EVALUATION_POLICY_VERSION,
       },
       source: {
         product: 'KodaX Space',
         storage: 'shared_kodax_session_store',
-        scope: 'user_sessions_only',
+        scope: 'user_and_managed_worker_sessions',
       },
-      benchmarkPolicy: {
-        defaultUsage: 'update_evidence',
-        validationRequiresIndependentHoldout: true,
-        freezeValidationBeforeHarnessChange: true,
-        failedTasksRemainEligibleForIssueDiscovery: true,
+      collectionPolicy: {
+        preserveAllReadableSessions: true,
+        preserveMainAndWorkerSessions: true,
+        privacyHandling: 'field_level_masking',
+        sessionsDroppedForPrivacy: false,
+        evaluationDecisionsDeferred: true,
       },
       counts: {
         discovered: discovered.length,
         eligible: selected.length,
-        processed: evaluationTraces.length,
+        processed: sessions.length,
         failed: failedSessions,
         excluded: excludedSessions,
-        evaluationCases: evaluationCases.length,
-        evalReady: decisions.eval_ready,
-        needsReview: decisions.needs_review,
-        privacyBlocked: decisions.privacy_blocked,
-        incomplete: decisions.incomplete,
-        duplicateCases,
+        conversationEntries: workflowReport.conversationEntries,
+        transcriptEntries: workflowReport.transcriptEntries,
+        toolCalls: workflowReport.toolCalls,
+        toolResults: workflowReport.toolResults,
+        skillUsages: workflowReport.skillUsages,
+        sessionsWithMaskedData: workflowReport.sessionsWithMaskedData,
         redactions: redactions.total,
         thinkingBlocksRemoved: redactions.thinkingBlocksRemoved,
         structuredFieldsRedacted: redactions.structuredFieldsRedacted,
         pseudonymizedIdentifiers: redactions.pseudonymizedIdentifiers,
         truncatedValues: redactions.truncatedValues,
         malformedRecords,
+        mainSessions: processedMainSessions.length,
+        workerSessions: workers.total,
+        linkedWorkerSessions: workers.linked,
+        inferredWorkerSessions: workers.inferred,
+        orphanWorkerSessions: workers.orphan,
+        ambiguousWorkerSessions: workers.ambiguous,
+        workerSessionsNeedingReview: workers.needsReview,
       },
       exclusions,
       processing: [
-        '只接入 KodaX Space 用户主 Session，排除 managed worker 与临时 quick-ask Session',
-        '保留完整事件图、有效与非有效分支、工具输入/结果和 Evidence 关系',
-        '对结构化字段逐项脱敏，移除 thinking，匿名化 ID，并保留工具数据的换行与结构',
-        '复用 Clean Trace 生成 Evidence Coverage、压缩指标、风险与治理摘要',
-        '为每个 Trace 生成一个 Evaluation Case、成功判据、Grader 配置和 Replay 需求',
-        '执行完整性、隐私、证据、回放、归因、污染与去重质量门禁',
-        '默认标记为 update_evidence；Validation 必须在 Harness 修改前冻结独立 Holdout',
+        '只读加载所有可解析的 KodaX Space 用户 Session、临时 Session 和 managed worker Session',
+        '保留完整 Transcript、有效与非有效分支、工具输入/结果、Evidence、错误和运行信息',
+        '对敏感值执行字段级遮罩和稳定匿名化，不因隐私信号删除或降级整个 Session',
+        '保留 Skill、计划、工具执行、验证和完成阶段的可观察 Workflow 索引',
+        'Worker 关系作为描述性拓扑保存；无法确定父级时仍完整保留',
+        '不在采集阶段生成 Grader、筛选 Benchmark 或决定 Validation 准入',
       ],
-      notice: '该数据包由本机生成且不会自动上传。eval_ready 仅代表通过自动预处理门禁；正式 Benchmark 仍需在 v0.2.0 完成数据划分、冻结和治理审批。v0.2.0 应优先读取 caseIndex 建立 Review 队列，再按 sourceTraceKey 关联完整 Trace。',
+      notice: '该数据包只在本机生成且不会自动上传。所有可解析 Session 都会在字段级脱敏后保留；Worker 拓扑仅用于帮助还原工作流，不会阻断数据。评测 Case、Grader、Holdout 和 Benchmark 决策统一延后到分析与评测阶段。',
     },
-    qualityReport,
-    caseIndex,
-    evaluationTraces,
-    evaluationCases,
+    workflowReport,
+    sessionIndex,
+    sessions,
   };
   const payload = gzipSync(Buffer.from(JSON.stringify(dataPackage), 'utf8'), { level: 9 });
   const date = generatedAt.slice(0, 10).replace(/-/g, '');
   const time = generatedAt.slice(11, 19).replace(/:/g, '');
-  const filename = `traceops-space-evaluation-${date}-${time}-${evaluationCases.length}.json.gz`;
+  const filename = `traceops-space-workflows-${date}-${time}-${sessions.length}.json.gz`;
   const run: CollectorRun = {
     id: packageId,
     status: 'completed',
@@ -392,14 +592,16 @@ export async function collectSpaceSessions(sessionsDir = resolveKodaXSessionsDir
     filename,
     downloadUrl: `/api/v0.1/collector/runs/${encodeURIComponent(packageId)}/download`,
     sourceSessions: discovered.length,
-    processedSessions: evaluationTraces.length,
-    evaluationCases: evaluationCases.length,
-    evaluationCandidates: evaluationCases.length,
-    evalReady: decisions.eval_ready,
-    needsReview: decisions.needs_review,
-    privacyBlocked: decisions.privacy_blocked,
-    incomplete: decisions.incomplete,
-    duplicateCases,
+    processedSessions: sessions.length,
+    mainSessions: processedMainSessions.length,
+    workerSessions: workers.total,
+    linkedWorkerSessions: workers.linked,
+    workerSessionsNeedingReview: workers.needsReview,
+    conversationEntries: workflowReport.conversationEntries,
+    toolCalls: workflowReport.toolCalls,
+    toolResults: workflowReport.toolResults,
+    skillUsages: workflowReport.skillUsages,
+    sessionsWithMaskedData: workflowReport.sessionsWithMaskedData,
     failedSessions,
     excludedSessions,
     redactions: redactions.total,
@@ -434,9 +636,30 @@ export function createSpaceCollectorV01Router(): Router {
     }
   });
 
+  router.get('/sessions', async (_req, res) => {
+    try {
+      res.json({ sessions: await listSpaceWorkflowSessions() });
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  router.get('/sessions/:sessionKey', async (req, res) => {
+    try {
+      const session = await getSpaceWorkflowSession(req.params.sessionKey);
+      if (!session) {
+        res.status(404).json({ error: 'Session 不存在或已经从本地目录移除。' });
+        return;
+      }
+      res.json(session);
+    } catch (error) {
+      res.status(500).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   router.post('/collect', async (_req, res) => {
     if (collectionInFlight) {
-      res.status(409).json({ error: '正在生成评测数据，请等待当前任务完成。' });
+      res.status(409).json({ error: '正在整理 Workflow，请等待当前任务完成。' });
       return;
     }
     collectionInFlight = true;
@@ -480,4 +703,4 @@ export function getCollectorPayloadForTesting(id: string): Buffer | undefined {
   return runs.get(id)?.payload;
 }
 
-export type { SpaceEvaluationCase, SpaceEvaluationTrace } from './spaceEvaluationPreprocessor';
+export type { SpaceWorkflowSession } from './spaceEvaluationPreprocessor';

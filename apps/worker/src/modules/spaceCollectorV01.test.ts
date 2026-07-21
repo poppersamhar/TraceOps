@@ -11,6 +11,8 @@ import {
   collectSpaceSessions,
   getCollectorPayloadForTesting,
   getCollectorStatus,
+  getSpaceWorkflowSession,
+  listSpaceWorkflowSessions,
   resetCollectorRunsForTesting,
   type CollectorPackage,
 } from './spaceCollectorV01';
@@ -21,8 +23,9 @@ async function writeSession(
   meta: Record<string, unknown>,
   messages: Array<Record<string, unknown>> = [],
   extraRecords: Array<Record<string, unknown>> = [],
+  projectName = 'fixture-project',
 ) {
-  const dir = path.join(sessionsDir, 'fixture-project');
+  const dir = path.join(sessionsDir, projectName);
   await fs.mkdir(dir, { recursive: true });
   const entries = messages.map((message, index) => ({
     _type: 'lineage_entry',
@@ -38,7 +41,7 @@ async function writeSession(
     {
       _type: 'meta',
       id: name,
-      title: 'Evaluation fixture',
+      title: 'Workflow fixture',
       createdAt: '2026-07-17T10:00:00.000Z',
       gitRoot: '/Users/alice/customer-project',
       activeEntryId: entries.at(-1)?.entry.id ?? null,
@@ -59,51 +62,100 @@ const calculationMessages = [
   },
   {
     role: 'user',
-    content: [{ type: 'tool_result', tool_use_id: 'tool-calc-1', content: { value: 4, status: 'ok' } }],
+    content: [{
+      type: 'tool_result',
+      tool_use_id: 'tool-calc-1',
+      content: { value: 4, status: 'ok', workerSessionId: 'worker-session' },
+    }],
   },
   { role: 'assistant', content: 'The verified result is 4.' },
 ];
-
-const verificationEvidence = [{
-  _type: 'artifact_ledger_entry',
-  entry: {
-    id: 'check-calculation',
-    kind: 'check_result',
-    target: 'calculation-result',
-    summary: 'Calculator result equals 4.',
-    timestamp: '2026-07-17T10:04:00.000Z',
-  },
-}];
 
 test('v0.1 credential risk distinguishes configuration mentions from high-confidence secrets', () => {
   const environmentMention = scanTextRisk('Update .env.example and document token=<placeholder>.');
   assert.equal(environmentMention.credentialRisk, 'mention');
   assert.equal(environmentMention.containsCredentialHint, false);
-  assert.equal(environmentMention.level, 'L2');
-
-  const exampleAssignment = scanTextRisk('api_key = example');
-  assert.equal(exampleAssignment.credentialRisk, 'mention');
-  assert.equal(exampleAssignment.containsCredentialHint, false);
 
   const highConfidence = scanTextRisk('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.realistic-token-material-123456');
   assert.equal(highConfidence.credentialRisk, 'high_confidence');
   assert.equal(highConfidence.containsCredentialHint, true);
-  assert.equal(highConfidence.level, 'L4');
 
   const harmless = scanTextRisk('The token budget is 4096 and no credentials are configured.');
   assert.equal(harmless.credentialRisk, 'none');
-  assert.equal(harmless.containsCredentialHint, false);
 });
 
-test('v0.1 collector produces complete Space evaluation traces, cases, and quality gates', async () => {
+test('v0.1 preserves inferred and orphan Workers without turning topology uncertainty into a data gate', async () => {
+  resetCollectorRunsForTesting();
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'traceops-worker-topology-'));
+  const sessionsDir = path.join(root, 'sessions');
+
+  try {
+    await writeSession(sessionsDir, 'main-session', { tag: 'code', scope: 'user' }, [
+      { role: 'user', content: 'Complete the main task.' },
+      { role: 'assistant', content: 'The main task is complete.' },
+    ], [], 'project-a');
+    await writeSession(sessionsDir, 'inferred-worker', { tag: 'code', scope: 'managed-task-worker' }, [
+      { role: 'user', content: 'Complete a delegated subtask.' },
+      { role: 'assistant', content: 'The delegated subtask is complete.' },
+    ], [], 'project-a');
+    await writeSession(sessionsDir, 'orphan-worker', { tag: 'code', scope: 'managed-task-worker' }, [
+      { role: 'user', content: 'Recover an unattached worker trace.' },
+      { role: 'assistant', content: 'The unattached worker trace was preserved.' },
+    ], [], 'project-b');
+
+    const run = await collectSpaceSessions(sessionsDir);
+    assert.equal(run.processedSessions, 3);
+    assert.equal(run.mainSessions, 1);
+    assert.equal(run.workerSessions, 2);
+    assert.equal(run.workerSessionsNeedingReview, 2);
+
+    const payload = getCollectorPayloadForTesting(run.id);
+    assert.ok(payload);
+    const data = JSON.parse(gunzipSync(payload).toString('utf8')) as CollectorPackage;
+    assert.deepEqual(data.workflowReport.workers, {
+      total: 2,
+      linked: 0,
+      inferred: 1,
+      orphan: 1,
+      ambiguous: 0,
+      needsReview: 2,
+    });
+    const inferred = data.sessions.find((item) => item.topology.linkStatus === 'inferred');
+    const orphan = data.sessions.find((item) => item.topology.linkStatus === 'orphan');
+    const main = data.sessions.find((item) => item.topology.role === 'main');
+    assert.ok(inferred);
+    assert.ok(orphan);
+    assert.ok(main);
+    assert.equal(inferred.topology.parentTraceKey, main.sessionKey);
+    assert.equal(inferred.topology.requiresReview, true);
+    assert.equal(orphan.topology.parentTraceKey, undefined);
+    assert.equal(orphan.topology.requiresReview, true);
+    assert.deepEqual(main.topology.childTraceKeys, [inferred.sessionKey]);
+    assert.equal(inferred.transcript.length, 2);
+    assert.equal(orphan.transcript.length, 2);
+  } finally {
+    resetCollectorRunsForTesting();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test('v0.1 exports complete sanitized Workflow Sessions and never drops a Session for privacy', async () => {
   resetCollectorRunsForTesting();
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'traceops-collector-'));
   const sessionsDir = path.join(root, 'sessions');
 
   try {
-    await writeSession(sessionsDir, 'ready-session', { tag: 'code', scope: 'user', title: 'Work from /Users/alice' }, calculationMessages, verificationEvidence);
-    await writeSession(sessionsDir, 'duplicate-session', { tag: 'code', scope: 'user', title: 'Work from /Users/alice' }, calculationMessages, verificationEvidence);
-    await writeSession(sessionsDir, 'privacy-session', { tag: 'partner', scope: 'user' }, [
+    await writeSession(sessionsDir, 'ready-session', { tag: 'code', scope: 'user', title: 'Work from /Users/alice' }, calculationMessages, [{
+      _type: 'artifact_ledger_entry',
+      entry: {
+        id: 'check-calculation',
+        kind: 'check_result',
+        target: 'calculation-result',
+        summary: 'Calculator result equals 4.',
+        timestamp: '2026-07-17T10:04:00.000Z',
+      },
+    }]);
+    await writeSession(sessionsDir, 'privacy-session', { tag: 'partner', scope: 'user', title: 'Sensitive /Users/alice/customer-project' }, [
       {
         role: 'user',
         content: 'Read /Users/alice/customer-project/report.md with api_key=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890 and reply to owner@example.com',
@@ -112,7 +164,12 @@ test('v0.1 collector produces complete Space evaluation traces, cases, and quali
         role: 'assistant',
         content: [
           { type: 'thinking', thinking: 'private chain of thought must never leave the machine' },
-          { type: 'tool_use', id: 'secret-tool', name: 'connector', input: { api_key: 'nested-secret-value' } },
+          {
+            type: 'tool_use',
+            id: 'secret-tool',
+            name: 'exec_command',
+            input: { api_key: 'nested-secret-value', command: 'open /opt/skills/workflow-review/SKILL.md' },
+          },
           { type: 'text', text: 'Completed from /Users/alice/customer-project/report.md' },
         ],
       },
@@ -122,111 +179,99 @@ test('v0.1 collector produces complete Space evaluation traces, cases, and quali
       { role: 'assistant', content: 'Documented the configuration schema without adding a real secret.' },
     ]);
     await writeSession(sessionsDir, 'ephemeral-session', { tag: 'quick-ask', scope: 'user' }, [
-      { role: 'user', content: 'temporary' },
+      { role: 'user', content: 'temporary but still preserved' },
     ]);
+    await writeSession(sessionsDir, 'empty-session', { tag: 'code', scope: 'user' });
     await writeSession(sessionsDir, 'worker-session', { tag: 'code', scope: 'managed-task-worker' }, [
-      { role: 'user', content: 'internal worker' },
+      { role: 'user', content: 'Verify the delegated calculation.' },
+      { role: 'assistant', content: 'The delegated calculation was verified.' },
     ]);
 
     const before = await getCollectorStatus(sessionsDir);
     assert.equal(before.source.detectedSessions, 6);
-    assert.equal(before.source.eligibleSessions, 4);
-    assert.equal(before.source.excludedSessions, 2);
+    assert.equal(before.source.eligibleSessions, 6);
+    assert.equal(before.source.excludedSessions, 0);
+
+    const browseList = await listSpaceWorkflowSessions(sessionsDir);
+    assert.equal(browseList.length, 6);
+    assert.ok(browseList.every((item) => item.sessionKey.startsWith('space_session_')));
+    assert.doesNotMatch(JSON.stringify(browseList), /privacy-session|\/Users\/alice/);
+    const privacyListItem = browseList.find((item) => item.title.startsWith('Sensitive'));
+    assert.ok(privacyListItem);
+    const browsedPrivacySession = await getSpaceWorkflowSession(privacyListItem.sessionKey, sessionsDir);
+    assert.ok(browsedPrivacySession);
+    assert.ok(browsedPrivacySession.transcript.length > 0);
+    assert.ok(browsedPrivacySession.workflow.skills.includes('workflow-review'));
+    assert.doesNotMatch(JSON.stringify(browsedPrivacySession), /nested-secret-value|owner@example\.com|\/Users\/alice/);
 
     const run = await collectSpaceSessions(sessionsDir);
-    assert.equal(run.processedSessions, 4);
-    assert.equal(run.evaluationCases, 4);
-    assert.equal(run.evalReady, 1);
-    assert.equal(run.needsReview, 2);
-    assert.equal(run.privacyBlocked, 1);
-    assert.equal(run.incomplete, 0);
-    assert.equal(run.duplicateCases, 1);
+    assert.equal(run.processedSessions, 6);
+    assert.equal(run.mainSessions, 5);
+    assert.equal(run.workerSessions, 1);
+    assert.equal(run.linkedWorkerSessions, 1);
+    assert.equal(run.failedSessions, 0);
+    assert.ok(run.conversationEntries >= 11);
+    assert.ok(run.toolCalls >= 2);
+    assert.ok(run.toolResults >= 1);
+    assert.ok(run.skillUsages >= 1);
+    assert.ok(run.sessionsWithMaskedData >= 1);
     assert.ok(run.redactions >= 4);
     assert.ok(run.structuredFieldsRedacted >= 1);
-    assert.equal(run.thinkingBlocksRemoved, 1);
-    assert.match(run.filename, /^traceops-space-evaluation-\d{8}-\d{6}-4\.json\.gz$/);
+    assert.ok(run.thinkingBlocksRemoved >= 1);
+    assert.match(run.filename, /^traceops-space-workflows-\d{8}-\d{6}-6\.json\.gz$/);
 
     const payload = getCollectorPayloadForTesting(run.id);
     assert.ok(payload);
     const data = JSON.parse(gunzipSync(payload).toString('utf8')) as CollectorPackage;
-    assert.equal(data.manifest.schema, 'traceops-space-evaluation-package-v1');
-    assert.equal(data.manifest.collectorVersion, '0.1.1');
-    assert.equal(data.manifest.compatibility.intendedConsumer, 'TraceOps v0.2.0 Agent Evaluation');
-    assert.equal(data.manifest.compatibility.caseIndexSchema, 'traceops-space-evaluation-case-index-v1');
-    assert.equal(data.manifest.benchmarkPolicy.defaultUsage, 'update_evidence');
-    assert.deepEqual(data.qualityReport.decisions, {
-      eval_ready: 1,
-      needs_review: 2,
-      privacy_blocked: 1,
-      incomplete: 0,
-    });
-    assert.equal(data.qualityReport.humanReviewRequired, 3);
-    assert.equal(data.caseIndex.length, 4);
-    assert.equal(data.evaluationTraces.length, 4);
-    assert.equal(data.evaluationCases.length, 4);
+    assert.equal(data.manifest.schema, 'traceops-space-workflow-package-v1');
+    assert.equal(data.manifest.collectorVersion, '0.1.2');
+    assert.equal(data.manifest.collectionPolicy.privacyHandling, 'field_level_masking');
+    assert.equal(data.manifest.collectionPolicy.sessionsDroppedForPrivacy, false);
+    assert.equal(data.manifest.collectionPolicy.evaluationDecisionsDeferred, true);
+    assert.equal(data.sessionIndex.length, 6);
+    assert.equal(data.sessions.length, 6);
+    assert.equal(data.workflowReport.sessions, 6);
+    assert.equal(data.manifest.counts.processed, 6);
     assert.equal(
       data.manifest.contentChecksum,
       createHash('sha256').update(JSON.stringify({
-        qualityReport: data.qualityReport,
-        caseIndex: data.caseIndex,
-        evaluationTraces: data.evaluationTraces,
-        evaluationCases: data.evaluationCases,
+        workflowReport: data.workflowReport,
+        sessionIndex: data.sessionIndex,
+        sessions: data.sessions,
       })).digest('hex'),
     );
 
-    const readyCase = data.evaluationCases.find((item) => item.qualityGate.decision === 'eval_ready');
-    assert.ok(readyCase);
-    assert.equal(readyCase.usage, 'update_evidence');
-    assert.equal(readyCase.grader.kind, 'trace_signal');
-    assert.equal(readyCase.benchmarkPromotion.validationEligible, true);
-    assert.equal(readyCase.benchmarkPromotion.independentHoldoutRequired, true);
-    assert.ok(readyCase.expected.assertions.some((item) => item.source === 'check_evidence'));
+    const privacySession = data.sessions.find((item) => item.workflow.skills.includes('workflow-review'));
+    assert.ok(privacySession);
+    assert.equal(privacySession.privacy.handling, 'field_level_masking');
+    assert.equal(privacySession.privacy.contentPreserved, true);
+    assert.ok(privacySession.transcript.length > 0);
+    assert.ok(privacySession.conversation.length > 0);
+    assert.ok(privacySession.events.some((item) => item.payload !== undefined));
+    assert.ok(privacySession.privacy.sensitiveValuesMasked > 0);
 
-    const readyTrace = data.evaluationTraces.find((item) => item.traceKey === readyCase.sourceTraceKey);
-    assert.ok(readyTrace);
-    assert.equal(readyTrace.preprocessing.evidenceCoverage.status, 'complete');
-    assert.ok(readyTrace.lineage.entries.length >= 4);
-    assert.ok(readyTrace.events.some((item) => JSON.stringify(item.payload).includes('2 + 2')));
-    assert.ok(readyTrace.events.some((item) => item.type === 'tool_result'));
-    const readyIndex = data.caseIndex.find((item) => item.caseKey === readyCase.caseKey);
-    assert.ok(readyIndex);
-    assert.equal(readyIndex.sourceTraceKey, readyCase.sourceTraceKey);
-    assert.equal(readyIndex.graderKind, 'trace_signal');
-    assert.equal(readyIndex.validationEligible, true);
-    assert.equal(readyIndex.exportPayload, 'full_sanitized_trace');
+    const ephemeral = data.sessions.find((item) => item.tag === 'quick-ask');
+    assert.ok(ephemeral);
+    assert.equal(ephemeral.conversation.length, 1);
+    const empty = data.sessions.find((item) => item.transcript.length === 0);
+    assert.ok(empty);
 
-    const duplicateCase = data.evaluationCases.find((item) => item.qualityGate.checks.some((check) => check.id === 'package_deduplication' && check.status === 'warn'));
-    assert.ok(duplicateCase);
-    assert.equal(duplicateCase.qualityGate.decision, 'needs_review');
-    assert.equal(duplicateCase.benchmarkPromotion.validationEligible, false);
-
-    const blockedCase = data.evaluationCases.find((item) => item.qualityGate.decision === 'privacy_blocked');
-    assert.ok(blockedCase);
-    assert.equal(blockedCase.input.task, '<WITHHELD_FOR_PRIVACY_REVIEW>');
-    const blockedTrace = data.evaluationTraces.find((item) => item.traceKey === blockedCase.sourceTraceKey);
-    assert.ok(blockedTrace);
-    assert.equal(blockedTrace.exportPayload, 'metadata_only');
-    assert.equal(blockedTrace.conversation.length, 0);
-    assert.ok(blockedTrace.events.every((item) => item.payload === undefined && item.payloadOmitted === 'privacy_blocked'));
-    const blockedIndex = data.caseIndex.find((item) => item.caseKey === blockedCase.caseKey);
-    assert.equal(blockedIndex?.exportPayload, 'metadata_only');
-    assert.equal(blockedIndex?.humanReviewRequired, true);
-
-    const mentionCase = data.evaluationCases.find((item) => item.qualityGate.checks.some((check) => check.id === 'credential_privacy' && check.status === 'warn'));
-    assert.ok(mentionCase);
-    assert.equal(mentionCase.qualityGate.decision, 'needs_review');
-    const mentionTrace = data.evaluationTraces.find((item) => item.traceKey === mentionCase.sourceTraceKey);
-    assert.ok(mentionTrace);
-    assert.equal(mentionTrace.exportPayload, 'full_sanitized_trace');
-    assert.ok(mentionTrace.conversation.length > 0);
+    const worker = data.sessions.find((item) => item.topology.role === 'worker');
+    assert.ok(worker);
+    assert.equal(worker.topology.linkStatus, 'linked');
+    const parent = data.sessions.find((item) => item.topology.childTraceKeys.includes(worker.sessionKey));
+    assert.ok(parent);
 
     const serialized = JSON.stringify(data);
+    assert.match(serialized, /\*\*\*/);
+    assert.match(serialized, /api_key(?:=\*\*\*|":"\*\*\*")/);
+    assert.match(serialized, /PRIVATE_REASONING_OMITTED/);
     assert.doesNotMatch(serialized, /sk-proj-abcdefghijklmnopqrstuvwxyz1234567890/);
     assert.doesNotMatch(serialized, /nested-secret-value/);
     assert.doesNotMatch(serialized, /owner@example\.com/);
     assert.doesNotMatch(serialized, /\/Users\/alice/);
     assert.doesNotMatch(serialized, /private chain of thought/);
-    assert.doesNotMatch(serialized, /ready-session|duplicate-session|privacy-session/);
+    assert.doesNotMatch(serialized, /"worker-session"|"ready-session"|"privacy-session"/);
 
     const after = await getCollectorStatus(sessionsDir);
     assert.equal(after.lastRun?.id, run.id);
