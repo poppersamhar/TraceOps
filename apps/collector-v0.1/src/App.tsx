@@ -17,6 +17,7 @@ import {
   type CollectorStatus,
 } from './api';
 import { ResultCard } from './ResultCard';
+import { SessionBrowser } from './SessionBrowser';
 import { SourceState } from './SourceState';
 
 export function App() {
@@ -70,20 +71,20 @@ export function App() {
     <main className="page-shell">
       <header className="topbar">
         <div className="brand"><Database size={18} strokeWidth={2.2} aria-hidden="true" /> TraceOps</div>
-        <div className="version-badge"><span>v0.1.1</span> Space Evaluation Collector</div>
+        <div className="version-badge"><span>v0.1.2</span> Space Workflow Collector</div>
       </header>
 
       <section className="hero">
-        <div className="hero-kicker"><Sparkles size={14} aria-hidden="true" /> 为 Agent 评测准备真实任务经验</div>
-        <h1>一键生成 Space 评测数据</h1>
-        <p>读取本机 Session，完成结构化脱敏、Trace 还原和质量门禁，生成可供下一阶段评测消费的数据包。</p>
+        <div className="hero-kicker"><Sparkles size={14} aria-hidden="true" /> 保存真实、完整、可复盘的 Agent 工作流</div>
+        <h1>一键收集 Space Workflow</h1>
+        <p>完整保留对话、Skill、工具、任务拆解、Worker 和结果；敏感值在原位置遮罩，不会因此丢弃整个 Session。</p>
       </section>
 
       <section className="collector-panel">
         <div className="steps" role="list" aria-label="数据整理流程">
           <div className={stepOneClass} role="listitem" aria-current={!sourceReady ? 'step' : undefined}><span>{sourceReady ? <Check size={15} aria-hidden="true" /> : '1'}</span><div><strong>检测数据</strong><small>读取本机 Space Session</small></div></div>
           <div className="step-line" aria-hidden="true" />
-          <div className={stepTwoClass} role="listitem" aria-current={collecting ? 'step' : undefined}><span>{effectiveRun ? <Check size={15} aria-hidden="true" /> : '2'}</span><div><strong>评测预处理</strong><small>Trace、Case 与质量门禁</small></div></div>
+          <div className={stepTwoClass} role="listitem" aria-current={collecting ? 'step' : undefined}><span>{effectiveRun ? <Check size={15} aria-hidden="true" /> : '2'}</span><div><strong>完整整理</strong><small>Transcript、Workflow 与字段脱敏</small></div></div>
           <div className="step-line" aria-hidden="true" />
           <div className={stepThreeClass} role="listitem" aria-current={effectiveRun ? 'step' : undefined}><span>{effectiveRun ? <Check size={15} aria-hidden="true" /> : '3'}</span><div><strong>下载发送</strong><small>生成单个压缩数据包</small></div></div>
         </div>
@@ -113,9 +114,9 @@ export function App() {
                 onClick={() => void collect()}
               >
                 {collecting ? <LoaderCircle className="spin" size={20} aria-hidden="true" /> : <FileArchive size={20} aria-hidden="true" />}
-                {collecting ? '正在生成评测数据…' : '收集并生成评测数据'}
+                {collecting ? '正在整理 Workflow…' : '收集完整 Workflow'}
               </button>
-              <span>{collecting ? '正在本机完成脱敏、Trace 还原和质量门禁，请不要关闭页面' : '整个过程只在本机完成'}</span>
+              <span>{collecting ? '正在本机还原完整 Session 并遮罩敏感值，请不要关闭页面' : '整个过程只在本机完成'}</span>
             </div>
           ) : !error && effectiveRun ? (
             <ResultCard run={effectiveRun} onCollectAgain={() => void collect()} />
@@ -125,13 +126,15 @@ export function App() {
 
       <section className="privacy-row" aria-label="数据处理说明">
         <div><LockKeyhole size={18} aria-hidden="true" /><span><strong>不会自动上传</strong><small>数据留在你的电脑中</small></span></div>
-        <div><ShieldCheck size={18} aria-hidden="true" /><span><strong>完整预处理</strong><small>脱敏、Trace、Case 与门禁</small></span></div>
+        <div><ShieldCheck size={18} aria-hidden="true" /><span><strong>局部隐私遮罩</strong><small>隐藏敏感值，保留完整 Workflow</small></span></div>
         <div><Database size={18} aria-hidden="true" /><span><strong>不修改源文件</strong><small>只读 Space Session</small></span></div>
       </section>
 
+      <SessionBrowser />
+
       <footer>
-        <span>TraceOps v0.1.1 是独立、可保留的采集版本</span>
-        <span>v0.2.0 将作为新的评测产品单独建设，不覆盖本版本</span>
+        <span>TraceOps v0.1.2 是独立的完整 Workflow Session 采集版本</span>
+        <span>评测 Case、Grader 和 Benchmark 决策统一在后续阶段完成</span>
       </footer>
     </main>
   );

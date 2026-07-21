@@ -22,9 +22,9 @@ export function SourceState({ status }: SourceStateProps) {
         <code>{status.source.path}</code>
         <p>
           {ready
-            ? `发现 ${status.source.detectedSessions} 个 Session，本次可生成 ${status.source.eligibleSessions} 个评测 Trace。`
+            ? `发现 ${status.source.detectedSessions} 个 Session，本次将完整整理 ${status.source.eligibleSessions} 个 Workflow。`
             : status.source.exists
-              ? '目录存在，但暂时没有可整理的用户 Session。'
+              ? '目录存在，但暂时没有可读取的 Session。'
               : '请先在 KodaX Space 中完成至少一次真实任务。'}
         </p>
       </div>

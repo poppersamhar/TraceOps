@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.2 — 2026-07-21
+
+- 将产品从 Evaluation-ready Collector 调整为 Workflow-first Collector。
+- 保留所有可解析的用户、临时、空和 managed Worker Session。
+- 导出完整 Transcript、有效与历史分支、Skill、工具、Evidence、错误和 Worker 拓扑。
+- 对敏感值执行字段级 `***` 遮罩或安全占位，不再因隐私信号丢弃整个 Session。
+- 新增 `workflowReport`、`sessionIndex` 和完整 `sessions` 包结构。
+- 新增本机 Session 浏览器，可按条查看完整脱敏 Workflow 流程；消息、工具调用与结果、错误和 Evidence 合并为统一时间线，原始数据视图默认折叠。
+- 将 Case、Grader、去重、质量审核和 Benchmark/Validation 决策延后到 v0.2.0。
+
 ## v0.1.0
 
 - 只读接入本机 KodaX Space Session。

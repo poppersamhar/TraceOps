@@ -4,6 +4,7 @@ interface Rule {
   type: TrainingTextRedactionType;
   pattern: RegExp;
   replacement: string;
+  reportReplacement?: string;
 }
 
 export interface DistilledText {
@@ -25,12 +26,13 @@ const rules: Rule[] = [
   {
     type: 'credential',
     pattern: /\b(?:sk|ghp|github_pat|xoxb|xoxp|AIza)[A-Za-z0-9_\-]{12,}\b/g,
-    replacement: '<SECRET>',
+    replacement: '***',
   },
   {
     type: 'credential',
-    pattern: /\b(?:api[_-]?key|token|password|secret)\s*['"]?\s*[:=]\s*['"]?[^'"\s,，;；)]+/gi,
-    replacement: '<SECRET_FIELD>',
+    pattern: /(\b(?:api[_-]?key|token|password|secret)\s*['"]?\s*[:=]\s*['"]?)[^'"\s,，;；)]+/gi,
+    replacement: '$1***',
+    reportReplacement: '***',
   },
   {
     type: 'local_path',
@@ -67,7 +69,7 @@ function recordRedaction(redactions: Map<TrainingTextRedactionType, TrainingText
   redactions.set(rule.type, {
     type: rule.type,
     count,
-    replacement: rule.replacement,
+    replacement: rule.reportReplacement ?? rule.replacement,
   });
 }
 
@@ -76,11 +78,8 @@ function applyRedactionRules(value: string | undefined, compactWhitespace: boole
   const redactions = new Map<TrainingTextRedactionType, TrainingTextRedaction>();
 
   for (const rule of rules) {
-    let count = 0;
-    clean = clean.replace(rule.pattern, () => {
-      count += 1;
-      return rule.replacement;
-    });
+    const count = clean.match(rule.pattern)?.length ?? 0;
+    clean = clean.replace(rule.pattern, rule.replacement);
     if (count > 0) recordRedaction(redactions, rule, count);
   }
 

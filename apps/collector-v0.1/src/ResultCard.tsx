@@ -23,48 +23,43 @@ function formatTime(value: string): string {
 }
 
 export function ResultCard({ run, onCollectAgain }: ResultCardProps) {
-  const gatedCases = run.needsReview + run.privacyBlocked + run.incomplete;
   return (
     <section className="result-card">
       <div className="result-heading">
         <div className="success-icon"><CheckCircle2 size={25} aria-hidden="true" /></div>
         <div>
           <span className="eyebrow success">整理完成</span>
-          <h2>评测数据包已准备好</h2>
+          <h2>Workflow 数据包已准备好</h2>
           <p>{formatTime(run.generatedAt)} · {run.filename}</p>
         </div>
       </div>
 
       <div className="result-metrics">
-        <div><strong>{run.processedSessions}</strong><span>有效 Session</span></div>
-        <div><strong>{run.evaluationCases}</strong><span>Evaluation Case</span></div>
-        <div><strong>{run.evalReady}</strong><span>自动预处理就绪</span></div>
-        <div><strong>{gatedCases}</strong><span>需后续处理</span></div>
+        <div><strong>{run.processedSessions}</strong><span>完整 Session</span></div>
+        <div><strong>{run.conversationEntries}</strong><span>对话记录</span></div>
+        <div><strong>{run.toolCalls}</strong><span>工具调用</span></div>
+        <div><strong>{run.skillUsages}</strong><span>识别到的 Skill</span></div>
       </div>
 
       <div className="gate-summary">
-        <span><i className="gate-dot review" aria-hidden="true" />{run.needsReview} 待复核</span>
-        <span><i className="gate-dot blocked" aria-hidden="true" />{run.privacyBlocked} 隐私阻断</span>
-        <span><i className="gate-dot incomplete" aria-hidden="true" />{run.incomplete} 不完整</span>
-        <span>{run.redactions} 项脱敏 · {formatBytes(run.compressedBytes)}</span>
+        <span>{run.mainSessions} 个主 Session · {run.workerSessions} 个 Worker</span>
+        <span>{run.toolResults} 条工具结果</span>
+        <span>{run.sessionsWithMaskedData} 个 Session 含局部遮罩</span>
+        <span>{run.redactions} 处隐私处理 · {formatBytes(run.compressedBytes)}</span>
       </div>
 
       <div className="readiness-note" role="note">
         <Info size={18} aria-hidden="true" />
         <div>
-          <strong>{run.evalReady === 0 ? '数据包生成成功，不代表评测失败' : '数据包已经通过完整预处理'}</strong>
-          <span>
-            {run.evalReady === 0
-              ? '这批 Case 会作为更新证据进入 v0.2.0 Review；不会自动混入 Benchmark。'
-              : `${run.evalReady} 条 Case 可进入 v0.2.0 Review，正式 Benchmark 仍需冻结独立 Holdout。`}
-          </span>
+          <strong>敏感内容只做局部遮罩，Session 不会因此被丢弃</strong>
+          <span>数据包保留 Transcript、分支、Skill、工具、Evidence、错误和 Worker 关系；评测筛选将在后续阶段单独完成。</span>
         </div>
       </div>
 
       <div className="result-actions">
         <a className="primary-button download-button" href={run.downloadUrl} download={run.filename} data-testid="download-package">
           <Download size={19} aria-hidden="true" />
-          下载评测数据包
+          下载 Workflow 数据包
         </a>
         <button className="secondary-button" type="button" onClick={onCollectAgain} data-testid="collect-again">
           <RefreshCw size={17} aria-hidden="true" />
