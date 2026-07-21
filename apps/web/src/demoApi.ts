@@ -77,6 +77,7 @@ const demoTrace = {
     containsSourceCodeHint: false,
     containsLocalPathHint: true,
     containsCredentialHint: false,
+    credentialRisk: 'none',
     containsCustomerDataHint: false,
     trainableByDefault: false,
   },

@@ -24,7 +24,7 @@ export interface CollectorRun {
 
 export interface CollectorStatus {
   product: string;
-  version: '0.1.0';
+  version: '0.1.1';
   source: {
     name: 'KodaX Space';
     path: string;
@@ -46,7 +46,7 @@ async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise
   try {
     response = await fetch(input, init);
   } catch {
-    throw new Error('请确认 TraceOps v0.1.0 已在本机运行，然后点击“重新检测”。');
+    throw new Error('请确认 TraceOps v0.1.1 已在本机运行，然后点击“重新检测”。');
   }
 
   let payload: T & { error?: string };
@@ -54,9 +54,9 @@ async function request<T>(input: RequestInfo | URL, init?: RequestInit): Promise
     payload = await response.json() as T & { error?: string };
   } catch {
     if (!response.ok && response.status >= 500) {
-      throw new Error('请确认 TraceOps v0.1.0 已在本机运行，然后点击“重新检测”。');
+      throw new Error('请确认 TraceOps v0.1.1 已在本机运行，然后点击“重新检测”。');
     }
-    throw new Error('本地服务返回了无法识别的结果，请重新启动 TraceOps v0.1.0。');
+    throw new Error('本地服务返回了无法识别的结果，请重新启动 TraceOps v0.1.1。');
   }
   if (!response.ok) throw new Error(payload.error ?? `请求失败（${response.status}）`);
   return payload;
